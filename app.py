@@ -136,7 +136,8 @@ async def create_folder(body: dict, key: bytes = Depends(_get_key)):
         raise HTTPException(status_code=400, detail="文件夹名不能为空")
     if len(name) > 64:
         raise HTTPException(status_code=400, detail="文件夹名过长")
-    folder_id = vault.create_folder(key, name)
+    parent_id = body.get("parent_id") or ""
+    folder_id = vault.create_folder(key, name, parent_id)
     return {"id": folder_id, "name": name}
 
 
@@ -157,12 +158,38 @@ async def delete_folder(folder_id: str, key: bytes = Depends(_get_key)):
     return {"ok": True}
 
 
+@app.patch("/api/folders/{folder_id}/move")
+async def move_folder(folder_id: str, body: dict, key: bytes = Depends(_get_key)):
+    new_parent_id = body.get("parent_id") or ""
+    if not vault.move_folder(key, folder_id, new_parent_id):
+        raise HTTPException(status_code=400, detail="无法移动（目标不能是自己或自己的子目录）")
+    return {"ok": True}
+
+
+@app.post("/api/folders/{folder_id}/copy")
+async def copy_folder(folder_id: str, body: dict, key: bytes = Depends(_get_key)):
+    dst_parent_id = body.get("parent_id") or ""
+    new_id = vault.copy_folder(key, folder_id, dst_parent_id)
+    if new_id is None:
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+    return {"id": new_id}
+
+
 @app.patch("/api/file/{file_id}/move")
 async def move_file(file_id: str, body: dict, key: bytes = Depends(_get_key)):
     folder_id = body.get("folder_id") or ""
     if not vault.move_file(key, file_id, folder_id):
         raise HTTPException(status_code=404, detail="文件不存在")
     return {"ok": True}
+
+
+@app.post("/api/file/{file_id}/copy")
+async def copy_file(file_id: str, body: dict, key: bytes = Depends(_get_key)):
+    folder_id = body.get("folder_id") or ""
+    new_id = vault.copy_file(key, file_id, folder_id)
+    if new_id is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return {"id": new_id}
 
 
 @app.post("/api/upload")

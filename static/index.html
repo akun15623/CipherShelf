@@ -35,9 +35,8 @@
     /* ============ 主布局 ============ */
     .app-shell { display: flex; height: 100vh; }
 
-    /* 侧边栏 */
     .sidebar {
-      width: 240px;
+      width: 250px;
       background: var(--card);
       border-right: 1px solid var(--border);
       display: flex;
@@ -56,35 +55,49 @@
     }
     .sidebar-body { flex: 1; overflow-y: auto; padding: 8px; }
     .sidebar-actions { padding: 12px; border-top: 1px solid var(--border); }
-    .folder-item {
+
+    .root-item {
       display: flex;
       align-items: center;
       gap: 8px;
       padding: 8px 12px;
       border-radius: 8px;
       cursor: pointer;
-      margin-bottom: 4px;
-      transition: background .15s;
+      margin-bottom: 6px;
       user-select: none;
+      font-size: 14px;
     }
-    .folder-item:hover { background: var(--card-hover); }
-    .folder-item.active { background: var(--accent); color: #fff; }
-    .folder-item .icon { font-size: 18px; flex-shrink: 0; }
-    .folder-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
-    .folder-item .menu-btn {
+    .root-item:hover { background: var(--card-hover); }
+    .root-item.active { background: var(--accent); color: #fff; }
+
+    /* el-tree 自定义 */
+    .tree-node {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      padding-right: 4px;
+    }
+    .tree-node .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+    .tree-node .menu-btn {
       opacity: 0;
-      width: 24px;
-      height: 24px;
-      border-radius: 4px;
       border: none;
       background: transparent;
-      color: inherit;
+      color: var(--text-dim);
       cursor: pointer;
+      font-size: 14px;
+      padding: 2px 6px;
+      border-radius: 4px;
       flex-shrink: 0;
     }
-    .folder-item:hover .menu-btn { opacity: .7; }
-    .folder-item .menu-btn:hover { opacity: 1; background: rgba(255,255,255,.15); }
-    .folder-item.active .menu-btn { color: #fff; }
+    .tree-node:hover .menu-btn { opacity: 1; }
+    .tree-node .menu-btn:hover { background: var(--card-hover); color: var(--text); }
+    .el-tree-node__content { height: 36px; }
+    .el-tree-node__content:hover { background: var(--card-hover); }
+    .el-tree-node.is-current > .el-tree-node__content { background: rgba(64,158,255,.15); }
+    .el-tree { background: transparent; color: var(--text); }
+    .el-tree-node__expand-icon { color: var(--text-dim); }
 
     /* 主区 */
     .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -106,7 +119,6 @@
       cursor: pointer;
       padding: 4px 8px;
     }
-    .app-title { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
     .breadcrumb {
       display: flex;
       align-items: center;
@@ -119,11 +131,7 @@
       white-space: nowrap;
     }
     .breadcrumb::-webkit-scrollbar { display: none; }
-    .crumb {
-      cursor: pointer;
-      padding: 2px 6px;
-      border-radius: 4px;
-    }
+    .crumb { cursor: pointer; padding: 2px 6px; border-radius: 4px; }
     .crumb:hover { background: var(--card-hover); color: var(--text); }
     .crumb.current { color: var(--text); font-weight: 600; cursor: default; }
     .crumb.current:hover { background: transparent; }
@@ -131,7 +139,6 @@
     .header-actions { display: flex; align-items: center; gap: 6px; }
     .app-body { flex: 1; overflow-y: auto; padding: 16px; }
 
-    /* 网格 */
     .grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
@@ -159,24 +166,23 @@
     .cell .meta { padding: 6px 8px; }
     .cell .name { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .cell .size { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
-    .cell .del {
+    .cell .op-btn {
       position: absolute;
       top: 4px;
       right: 4px;
       opacity: 0;
       transition: opacity .15s;
+      border: none;
+      background: rgba(0,0,0,.5);
+      color: #fff;
+      cursor: pointer;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      font-size: 13px;
     }
-    .cell:hover .del { opacity: 1; }
-    .cell .move-btn {
-      position: absolute;
-      top: 4px;
-      right: 32px;
-      opacity: 0;
-      transition: opacity .15s;
-    }
-    .cell:hover .move-btn { opacity: 1; }
+    .cell:hover .op-btn { opacity: 1; }
 
-    /* 列表 */
     .list-row {
       display: flex;
       align-items: center;
@@ -194,12 +200,10 @@
     .empty { text-align: center; color: var(--text-dim); padding: 60px 0; }
     .empty .big { font-size: 50px; }
 
-    /* 视频/音频播放器 */
     .player-dialog .el-dialog__body { padding: 0; }
     video, audio { width: 100%; display: block; }
     .video-wrap { background: #000; }
 
-    /* 移动端 */
     .sidebar-backdrop {
       display: none;
       position: fixed;
@@ -241,7 +245,7 @@ if (typeof ElementPlus === 'undefined') {
   throw new Error('ElementPlus not loaded');
 }
 
-const { createApp, ref, computed, onMounted, watch } = Vue;
+const { createApp, ref, computed, onMounted } = Vue;
 const { ElMessage, ElMessageBox } = ElementPlus;
 
 const TEMPLATE = `
@@ -275,36 +279,55 @@ const TEMPLATE = `
   </div>
 
   <div v-else class="app-shell">
-    <!-- 侧边栏 -->
     <div :class="['sidebar', sidebarOpen ? 'open' : '']">
-      <div class="sidebar-header">
-        <span>🔐 保险箱</span>
-      </div>
+      <div class="sidebar-header">🔐 保险箱</div>
       <div class="sidebar-body">
-        <div :class="['folder-item', currentFolderId === '' ? 'active' : '']" @click="navigateFolder('')">
-          <span class="icon">📂</span>
-          <span class="name">全部文件</span>
+        <div :class="['root-item', currentFolderId === '' ? 'active' : '']" @click="navigateFolder('')">
+          <span>📂 全部文件</span>
         </div>
-        <div v-for="f in folders" :key="f.id" :class="['folder-item', currentFolderId === f.id ? 'active' : '']">
-          <span class="icon" @click.stop="navigateFolder(f.id)">📁</span>
-          <span class="name" @click="navigateFolder(f.id)">{{ f.name }}</span>
-          <button class="menu-btn" @click.stop="folderMenu(f, $event)">⋯</button>
-        </div>
+        <el-tree
+          v-if="foldersLoaded"
+          :data="folderTree"
+          node-key="id"
+          :default-expanded-keys="allFolderIds"
+          :expand-on-click-node="false"
+          :highlight-current="true"
+          :current-node-key="currentFolderId"
+          @node-click="onTreeNodeClick"
+        >
+          <template #default="{ node, data }">
+            <div class="tree-node" @click.stop="navigateFolder(data.id)">
+              <span>📁</span>
+              <span class="name">{{ node.label }}</span>
+              <el-dropdown trigger="click" @command="(cmd) => folderCommand(cmd, data)" @click.stop>
+                <button class="menu-btn" @click.stop>⋯</button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="open">打开</el-dropdown-item>
+                    <el-dropdown-item command="new">新建子文件夹</el-dropdown-item>
+                    <el-dropdown-item command="rename" divided>重命名</el-dropdown-item>
+                    <el-dropdown-item command="move">移动到...</el-dropdown-item>
+                    <el-dropdown-item command="copy">复制到...</el-dropdown-item>
+                    <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
+          </template>
+        </el-tree>
       </div>
       <div class="sidebar-actions">
-        <el-button size="small" style="width:100%" @click="showNewFolder = true">+ 新建文件夹</el-button>
+        <el-button size="small" style="width:100%" @click="newFolderIn(currentFolderId)">+ 新建文件夹</el-button>
       </div>
     </div>
-    <!-- 移动端遮罩 -->
     <div :class="['sidebar-backdrop', sidebarOpen ? 'show' : '']" @click="sidebarOpen = false"></div>
 
-    <!-- 主区 -->
     <div class="main">
       <div class="app-header">
         <button class="menu-btn-header" @click="sidebarOpen = !sidebarOpen">☰</button>
         <div class="breadcrumb">
           <span class="crumb" @click="navigateFolder('')">根目录</span>
-          <template v-for="(crumb, idx) in breadcrumbItems" :key="idx">
+          <template v-for="(crumb, idx) in breadcrumbItems" :key="crumb.id">
             <span class="crumb-sep">/</span>
             <span :class="['crumb', idx === breadcrumbItems.length - 1 ? 'current' : '']" @click="navigateFolder(crumb.id)">{{ crumb.name }}</span>
           </template>
@@ -329,12 +352,21 @@ const TEMPLATE = `
               <template #error><div class="thumb">🖼️</div></template>
             </el-image>
             <div v-else class="thumb" @click="open(f)">{{ iconFor(f.mime) }}</div>
-            <div class="meta">
+            <div class="meta" @click="open(f)">
               <div class="name" :title="f.name">{{ f.name }}</div>
               <div class="size">{{ fmtSize(f.size) }}</div>
             </div>
-            <el-button class="move-btn" size="small" circle @click.stop="moveFileDialog(f)">↗</el-button>
-            <el-button class="del" size="small" circle type="danger" @click.stop="del(f)">✕</el-button>
+            <el-dropdown trigger="click" @command="(cmd) => fileCommand(cmd, f)" @click.stop>
+              <button class="op-btn" @click.stop>⋯</button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="open">打开</el-dropdown-item>
+                  <el-dropdown-item command="copy" divided>复制到...</el-dropdown-item>
+                  <el-dropdown-item command="move">移动到...</el-dropdown-item>
+                  <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </div>
         </div>
         <div v-else>
@@ -342,7 +374,8 @@ const TEMPLATE = `
             <div class="icon">{{ iconFor(f.mime) }}</div>
             <div class="lname">{{ f.name }}</div>
             <div class="lsize">{{ fmtSize(f.size) }}</div>
-            <el-button size="small" text @click.stop="moveFileDialog(f)">移动</el-button>
+            <el-button size="small" text @click.stop="copyFileTo(f)">复制</el-button>
+            <el-button size="small" text @click.stop="moveFileTo(f)">移动</el-button>
             <el-button size="small" type="danger" text @click.stop="del(f)">删除</el-button>
           </div>
         </div>
@@ -371,10 +404,10 @@ const TEMPLATE = `
       </el-dialog>
 
       <!-- 新建文件夹 -->
-      <el-dialog v-model="showNewFolder" title="新建文件夹" width="360px">
+      <el-dialog v-model="newFolderVisible" :title="newFolderParent ? '新建子文件夹' : '新建文件夹'" width="360px">
         <el-input v-model="newFolderName" placeholder="文件夹名" @keyup.enter="createFolder" />
         <div style="margin-top:14px; text-align:right;">
-          <el-button @click="showNewFolder=false">取消</el-button>
+          <el-button @click="newFolderVisible=false">取消</el-button>
           <el-button type="primary" @click="createFolder">创建</el-button>
         </div>
       </el-dialog>
@@ -388,20 +421,17 @@ const TEMPLATE = `
         </div>
       </el-dialog>
 
-      <!-- 移动文件 -->
-      <el-dialog v-model="moveVisible" title="移动文件到..." width="360px">
-        <el-radio-group v-model="moveTarget" style="width:100%;">
-          <el-radio value="" style="display:flex; margin:6px 0;">📂 根目录</el-radio>
-          <el-radio v-for="f in folders" :key="f.id" :value="f.id" style="display:flex; margin:6px 0;">📁 {{ f.name }}</el-radio>
-        </el-radio-group>
+      <!-- 移动/复制到 -->
+      <el-dialog v-model="transferVisible" :title="transferTitle" width="400px">
+        <el-select v-model="transferTarget" placeholder="选择目标文件夹" style="width:100%;" filterable>
+          <el-option label="📂 根目录" value="" />
+          <el-option v-for="f in transferOptions" :key="f.id" :label="'📁 ' + f.path" :value="f.id" />
+        </el-select>
         <div style="margin-top:14px; text-align:right;">
-          <el-button @click="moveVisible=false">取消</el-button>
-          <el-button type="primary" @click="doMove">移动</el-button>
+          <el-button @click="transferVisible=false">取消</el-button>
+          <el-button type="primary" :loading="transferBusy" @click="doTransfer">确定</el-button>
         </div>
       </el-dialog>
-
-      <!-- 文件夹右键菜单 -->
-      <ul v-show="false"></ul>
     </div>
   </div>
 `;
@@ -420,6 +450,7 @@ const app = createApp({
     const files = ref([]);
     const currentFolderId = ref('');
     const viewMode = ref('grid');
+    const foldersLoaded = ref(false);
 
     const uploadVisible = ref(false);
     const uploading = ref(false);
@@ -430,16 +461,36 @@ const app = createApp({
     const playerUrl = ref('');
     const isVideo = ref(false);
 
-    const showNewFolder = ref(false);
+    const newFolderVisible = ref(false);
     const newFolderName = ref('');
+    const newFolderParent = ref('');
     const renameVisible = ref(false);
     const renameValue = ref('');
     const renameTargetId = ref('');
-    const moveVisible = ref(false);
-    const moveTarget = ref('');
-    const moveTargetFileId = ref('');
+
+    const transferVisible = ref(false);
+    const transferBusy = ref(false);
+    const transferMode = ref('move');   // 'move' | 'copy'
+    const transferType = ref('file');   // 'file' | 'folder'
+    const transferSourceId = ref('');
+    const transferTarget = ref('');
 
     const sidebarOpen = ref(false);
+
+    // 树形数据
+    const folderTree = computed(() => {
+      const map = {};
+      folders.value.forEach(f => { map[f.id] = { id: f.id, label: f.name, parent_id: f.parent_id, children: [] }; });
+      const roots = [];
+      folders.value.forEach(f => {
+        const node = map[f.id];
+        if (f.parent_id && map[f.parent_id]) map[f.parent_id].children.push(node);
+        else roots.push(node);
+      });
+      return roots;
+    });
+
+    const allFolderIds = computed(() => folders.value.map(f => f.id));
 
     const breadcrumbItems = computed(() => {
       const items = [];
@@ -448,8 +499,7 @@ const app = createApp({
         const f = folders.value.find(x => x.id === cur);
         if (!f) break;
         items.unshift({ id: f.id, name: f.name });
-        // 单层结构，没有父目录；遇到没有 parent 时停
-        break;
+        cur = f.parent_id;
       }
       return items;
     });
@@ -459,9 +509,35 @@ const app = createApp({
       return f ? f.name : '';
     });
 
+    // 移动/复制目标选项（排除源自身，含全路径）
+    const transferOptions = computed(() => {
+      const exclude = transferSourceId.value;
+      return folders.value
+        .filter(f => f.id !== exclude)
+        .map(f => ({ id: f.id, path: folderPath(f) }));
+    });
+
+    const transferTitle = computed(() => {
+      const verb = transferMode.value === 'move' ? '移动' : '复制';
+      const noun = transferType.value === 'folder' ? '文件夹' : '文件';
+      return `${verb}${noun}到...`;
+    });
+
     const imgPreviewList = computed(() =>
       files.value.filter(x => x.mime.startsWith('image/')).map(x => '/api/file/' + x.id)
     );
+
+    function folderPath(f) {
+      const parts = [f.name];
+      let cur = f.parent_id;
+      while (cur) {
+        const p = folders.value.find(x => x.id === cur);
+        if (!p) break;
+        parts.unshift(p.name);
+        cur = p.parent_id;
+      }
+      return parts.join(' / ');
+    }
 
     async function api(path, opts = {}) {
       const res = await fetch(path, {
@@ -520,6 +596,7 @@ const app = createApp({
       unlocked.value = false;
       files.value = [];
       folders.value = [];
+      foldersLoaded.value = false;
       currentFolderId.value = '';
       try {
         const s = await fetch('/api/status', { credentials: 'include' }).then(r => r.json());
@@ -535,6 +612,7 @@ const app = createApp({
         ]);
         folders.value = fr.folders || [];
         files.value = fl.files || [];
+        foldersLoaded.value = true;
       } catch (e) { if (e.message === '未解锁') unlocked.value = false; }
     }
 
@@ -544,75 +622,110 @@ const app = createApp({
       refresh();
     }
 
+    function onTreeNodeClick(data) {
+      navigateFolder(data.id);
+    }
+
+    function newFolderIn(parentId) {
+      newFolderParent.value = parentId || '';
+      newFolderName.value = '';
+      newFolderVisible.value = true;
+    }
+
     async function createFolder() {
       const name = newFolderName.value.trim();
       if (!name) { ElMessage.warning('请输入文件夹名'); return; }
       try {
-        await api('/api/folders', { method: 'POST', body: JSON.stringify({ name }) });
+        await api('/api/folders', { method: 'POST', body: JSON.stringify({ name, parent_id: newFolderParent.value }) });
         newFolderName.value = '';
-        showNewFolder.value = false;
+        newFolderVisible.value = false;
         ElMessage.success('已创建');
         await refresh();
       } catch (e) { ElMessage.error(e.message); }
     }
 
-    async function folderMenu(f, ev) {
-      try {
-        const choice = await ElMessageBox({
-          title: f.name,
-          message: '选择操作',
-          showCancelButton: true,
-          confirmButtonText: '重命名',
-          cancelButtonText: '删除',
-          distinguishCancelAndClose: true,
-        }).catch(e => e);
-        if (choice === 'confirm') {
-          renameTargetId.value = f.id;
-          renameValue.value = f.name;
-          renameVisible.value = true;
-        } else if (choice === 'cancel') {
-          try {
-            await ElMessageBox.confirm(`删除文件夹「${f.name}」？里面的文件会被移到根目录。`, '删除', { type: 'warning' });
-          } catch (e) { return; }
-          try {
-            await api('/api/folders/' + f.id, { method: 'DELETE' });
-            ElMessage.success('已删除');
-            if (currentFolderId.value === f.id) navigateFolder('');
-            else await refresh();
-          } catch (e) { ElMessage.error(e.message); }
-        }
-      } catch (e) {}
+    async function folderCommand(cmd, data) {
+      if (cmd === 'open') { navigateFolder(data.id); return; }
+      if (cmd === 'new') { newFolderIn(data.id); return; }
+      if (cmd === 'rename') {
+        renameTargetId.value = data.id;
+        renameValue.value = data.label;
+        renameVisible.value = true;
+        return;
+      }
+      if (cmd === 'move' || cmd === 'copy') {
+        transferMode.value = cmd;
+        transferType.value = 'folder';
+        transferSourceId.value = data.id;
+        transferTarget.value = '';
+        transferVisible.value = true;
+        return;
+      }
+      if (cmd === 'delete') {
+        try {
+          await ElMessageBox.confirm(`删除文件夹「${data.label}」？其子文件夹会一并删除，文件将上浮到上级目录。`, '删除', { type: 'warning' });
+        } catch (e) { return; }
+        try {
+          await api('/api/folders/' + data.id, { method: 'DELETE' });
+          ElMessage.success('已删除');
+          if (currentFolderId.value === data.id) navigateFolder('');
+          else await refresh();
+        } catch (e) { ElMessage.error(e.message); }
+      }
     }
 
     async function doRename() {
       const name = renameValue.value.trim();
       if (!name) return;
       try {
-        await api('/api/folders/' + renameTargetId.value, {
-          method: 'PATCH',
-          body: JSON.stringify({ name }),
-        });
+        await api('/api/folders/' + renameTargetId.value, { method: 'PATCH', body: JSON.stringify({ name }) });
         renameVisible.value = false;
         await refresh();
       } catch (e) { ElMessage.error(e.message); }
     }
 
-    function moveFileDialog(f) {
-      moveTargetFileId.value = f.id;
-      moveTarget.value = currentFolderId.value;
-      moveVisible.value = true;
+    function fileCommand(cmd, f) {
+      if (cmd === 'open') { open(f); return; }
+      if (cmd === 'copy') { copyFileTo(f); return; }
+      if (cmd === 'move') { moveFileTo(f); return; }
+      if (cmd === 'delete') { del(f); return; }
     }
 
-    async function doMove() {
+    function copyFileTo(f) {
+      transferMode.value = 'copy';
+      transferType.value = 'file';
+      transferSourceId.value = f.id;
+      transferTarget.value = '';
+      transferVisible.value = true;
+    }
+
+    function moveFileTo(f) {
+      transferMode.value = 'move';
+      transferType.value = 'file';
+      transferSourceId.value = f.id;
+      transferTarget.value = '';
+      transferVisible.value = true;
+    }
+
+    async function doTransfer() {
+      transferBusy.value = true;
       try {
-        await api('/api/file/' + moveTargetFileId.value + '/move', {
-          method: 'PATCH',
-          body: JSON.stringify({ folder_id: moveTarget.value }),
-        });
-        moveVisible.value = false;
-        ElMessage.success('已移动');
+        if (transferType.value === 'file') {
+          const url = transferMode.value === 'move'
+            ? '/api/file/' + transferSourceId.value + '/move'
+            : '/api/file/' + transferSourceId.value + '/copy';
+          await api(url, { method: transferMode.value === 'move' ? 'PATCH' : 'POST', body: JSON.stringify({ folder_id: transferTarget.value }) });
+        } else {
+          const url = transferMode.value === 'move'
+            ? '/api/folders/' + transferSourceId.value + '/move'
+            : '/api/folders/' + transferSourceId.value + '/copy';
+          await api(url, { method: transferMode.value === 'move' ? 'PATCH' : 'POST', body: JSON.stringify({ parent_id: transferTarget.value }) });
+        }
+        transferVisible.value = false;
+        ElMessage.success(transferMode.value === 'move' ? '已移动' : '已复制');
         await refresh();
       } catch (e) { ElMessage.error(e.message); }
+      finally { transferBusy.value = false; }
     }
 
     function onPick(file) { pickedFiles.value.push(file.raw); }
@@ -647,7 +760,7 @@ const app = createApp({
 
     function iconFor(mime) {
       if (mime.startsWith('video/')) return '🎬';
-      if (mime.startsWith('audio/')) return '�';
+      if (mime.startsWith('audio/')) return '🎵';
       if (mime.startsWith('image/')) return '🖼️';
       if (mime.includes('pdf')) return '📄';
       if (mime.includes('zip') || mime.includes('rar') || mime.includes('7z')) return '📦';
@@ -689,14 +802,16 @@ const app = createApp({
     return {
       initialized, unlocked, password, password2, busy, err,
       folders, files, currentFolderId, currentFolderName, breadcrumbItems,
+      folderTree, allFolderIds, foldersLoaded,
       viewMode, uploadVisible, uploading, pickedFiles,
       playerVisible, playerName, playerUrl, isVideo,
-      showNewFolder, newFolderName,
+      newFolderVisible, newFolderName, newFolderParent,
       renameVisible, renameValue,
-      moveVisible, moveTarget,
+      transferVisible, transferBusy, transferTitle, transferOptions, transferTarget,
       sidebarOpen, imgPreviewList,
-      doInit, doUnlock, doLock, refresh, navigateFolder, createFolder,
-      folderMenu, doRename, moveFileDialog, doMove, onPick, doUpload,
+      doInit, doUnlock, doLock, refresh, navigateFolder, onTreeNodeClick,
+      newFolderIn, createFolder, folderCommand, doRename,
+      fileCommand, copyFileTo, moveFileTo, doTransfer, onPick, doUpload,
       isImg, thumbUrl, imgIndexOf, iconFor, open, del, fmtSize,
     };
   },

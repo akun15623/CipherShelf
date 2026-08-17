@@ -262,9 +262,18 @@ class Vault:
                 """CREATE TABLE IF NOT EXISTS folders (
                     id TEXT PRIMARY KEY,
                     name_enc TEXT NOT NULL,
+                    parent_id_enc TEXT NOT NULL DEFAULT '',
                     created INTEGER NOT NULL
                 )"""
             )
+            # 迁移：旧版本 folders 表缺少 parent_id_enc 列时补齐
+            cols = [r[1] for r in c.execute("PRAGMA table_info(folders)").fetchall()]
+            if "parent_id_enc" not in cols:
+                c.execute("ALTER TABLE folders ADD COLUMN parent_id_enc TEXT NOT NULL DEFAULT ''")
+            # 迁移：旧版本 files 表缺少 folder_id_enc 列时补齐
+            fcols = [r[1] for r in c.execute("PRAGMA table_info(files)").fetchall()]
+            if "folder_id_enc" not in fcols:
+                c.execute("ALTER TABLE files ADD COLUMN folder_id_enc TEXT NOT NULL DEFAULT ''")
 
     # -- 初始化 / 解锁 -----------------------------------------------------
     @property
@@ -345,13 +354,86 @@ class Vault:
             })
         return out
 
+    def copy_file(self, master_key: bytes, src_file_id: str, dst_folder_id: str = "") -> str | None:
+        """复制文件（流式：逐块解密+重加密，生成独立新 data_key，不占内存）。"""
+        rec = self.get_record(src_file_id)
+        if not rec:
+            return None
+        src_path = self.get_file_path(src_file_id)
+        new_id = uuid.uuid4().hex
+        dst_path = os.path.join(self.files_dir, new_id + ".enc")
+
+        # 新 data_key（每文件独立密钥）
+        new_data_key = os.urandom(KEY_SIZE)
+        new_aes = AESGCM(new_data_key)
+        dk_nonce = os.urandom(NONCE_SIZE)
+        dk_ct = AESGCM(master_key).encrypt(dk_nonce, new_data_key, b"data-key")
+
+        # 读原 data_key
+        with open(src_path, "rb") as fin:
+            old_dk_nonce, old_dk_ct, block_size = _read_header(fin)
+        old_data_key = _decrypt_data_key(master_key, old_dk_nonce, old_dk_ct)
+        old_aes = AESGCM(old_data_key)
+
+        plain_size = 0
+        with open(src_path, "rb") as fin, open(dst_path, "wb") as fout:
+            fout.write(MAGIC)
+            fout.write(bytes([VERSION]))
+            fout.write(dk_nonce)
+            fout.write(dk_ct)
+            fout.write(block_size.to_bytes(HEADER_BLOCK_SIZE, "big"))
+
+            fin.seek(HEADER_SIZE)
+            block_index = 0
+            while True:
+                nonce = fin.read(NONCE_SIZE)
+                if len(nonce) < NONCE_SIZE:
+                    break
+                ct = fin.read(block_size + TAG_SIZE)
+                if len(ct) < TAG_SIZE:
+                    break
+                old_aad = src_file_id.encode("utf-8") + block_index.to_bytes(8, "big")
+                pt = old_aes.decrypt(nonce, ct, old_aad)
+                plain_size += len(pt)
+                new_nonce = os.urandom(NONCE_SIZE)
+                new_aad = new_id.encode("utf-8") + block_index.to_bytes(8, "big")
+                new_ct = new_aes.encrypt(new_nonce, pt, new_aad)
+                fout.write(new_nonce)
+                fout.write(new_ct)
+                block_index += 1
+
+        cipher_size = os.path.getsize(dst_path)
+        name = decrypt_name(master_key, src_file_id, rec["name_enc"])
+        mime = decrypt_name(master_key, src_file_id, rec["mime_enc"])
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO files(id,name_enc,mime_enc,size,cipher_size,thumb,folder_id_enc,created) VALUES(?,?,?,?,?,0,?,?)",
+                (
+                    new_id,
+                    encrypt_name(master_key, new_id, name),
+                    encrypt_name(master_key, new_id, mime),
+                    plain_size,
+                    cipher_size,
+                    encrypt_name(master_key, new_id, dst_folder_id or ""),
+                    int(time.time()),
+                ),
+            )
+        # 复制缩略图
+        if self.has_thumb(src_file_id):
+            try:
+                self.save_thumb(master_key, new_id, self.read_thumb(master_key, src_file_id))
+            except Exception:
+                pass
+        return new_id
+
     # -- 文件夹操作 -----------------------------------------------------
-    def create_folder(self, master_key: bytes, name: str) -> str:
+    def create_folder(self, master_key: bytes, name: str, parent_id: str = "") -> str:
         folder_id = uuid.uuid4().hex
         with self._conn() as c:
             c.execute(
-                "INSERT INTO folders(id,name_enc,created) VALUES(?,?,?)",
-                (folder_id, encrypt_name(master_key, folder_id, name), int(time.time())),
+                "INSERT INTO folders(id,name_enc,parent_id_enc,created) VALUES(?,?,?,?)",
+                (folder_id, encrypt_name(master_key, folder_id, name),
+                 encrypt_name(master_key, folder_id, parent_id or ""), int(time.time())),
             )
         return folder_id
 
@@ -359,9 +441,36 @@ class Vault:
         with self._conn() as c:
             rows = c.execute("SELECT * FROM folders ORDER BY created ASC").fetchall()
         return [
-            {"id": r["id"], "name": decrypt_name(master_key, r["id"], r["name_enc"]), "created": r["created"]}
+            {
+                "id": r["id"],
+                "name": decrypt_name(master_key, r["id"], r["name_enc"]),
+                "parent_id": decrypt_name(master_key, r["id"], r["parent_id_enc"]) if r["parent_id_enc"] else "",
+                "created": r["created"],
+            }
             for r in rows
         ]
+
+    def _folder_parent(self, master_key: bytes, folder_id: str) -> str:
+        with self._conn() as c:
+            r = c.execute("SELECT parent_id_enc FROM folders WHERE id=?", (folder_id,)).fetchone()
+        if not r or not r["parent_id_enc"]:
+            return ""
+        return decrypt_name(master_key, folder_id, r["parent_id_enc"])
+
+    def _folder_name(self, master_key: bytes, folder_id: str) -> str:
+        with self._conn() as c:
+            r = c.execute("SELECT name_enc FROM folders WHERE id=?", (folder_id,)).fetchone()
+        return decrypt_name(master_key, folder_id, r["name_enc"]) if r else ""
+
+    def _folder_children(self, master_key: bytes, folder_id: str) -> list[str]:
+        with self._conn() as c:
+            rows = c.execute("SELECT id, parent_id_enc FROM folders").fetchall()
+        out = []
+        for r in rows:
+            p = decrypt_name(master_key, r["id"], r["parent_id_enc"]) if r["parent_id_enc"] else ""
+            if p == folder_id:
+                out.append(r["id"])
+        return out
 
     def rename_folder(self, master_key: bytes, folder_id: str, new_name: str) -> bool:
         with self._conn() as c:
@@ -371,29 +480,61 @@ class Vault:
             )
             return cur.rowcount > 0
 
-    def delete_folder(self, folder_id: str) -> bool:
-        """删除文件夹：内部文件移到根目录后删除文件夹。"""
+    def move_folder(self, master_key: bytes, folder_id: str, new_parent_id: str) -> bool:
+        """移动文件夹到新父级。防循环：目标不能是自己或自己的子孙。"""
+        if folder_id == new_parent_id:
+            return False
+        # 从 new_parent_id 往上走到根，若经过 folder_id 则构成循环
+        cur = new_parent_id
+        while cur:
+            if cur == folder_id:
+                return False
+            cur = self._folder_parent(master_key, cur)
         with self._conn() as c:
-            # 文件的 folder_id_enc 仍指向本目录——直接置空（不重新加密，原值仍可解）
-            c.execute("UPDATE files SET folder_id_enc='' WHERE folder_id_enc IS NOT NULL")  # 占位
-        # 实际上需要 master_key 才能正确处理；调用方 delete_folder_for_user 提供
-        raise NotImplementedError("请调用 delete_folder_for_user")
+            cur = c.execute(
+                "UPDATE folders SET parent_id_enc=? WHERE id=?",
+                (encrypt_name(master_key, folder_id, new_parent_id or ""), folder_id),
+            )
+            return cur.rowcount > 0
+
+    def copy_folder(self, master_key: bytes, src_folder_id: str, dst_parent_id: str = "") -> str | None:
+        """递归复制文件夹（含子文件夹和文件），返回新文件夹 id。"""
+        # 防循环：目标不能是源自身或其子孙
+        cur = dst_parent_id
+        while cur:
+            if cur == src_folder_id:
+                return None
+            cur = self._folder_parent(master_key, cur)
+        src_name = self._folder_name(master_key, src_folder_id)
+        new_id = self.create_folder(master_key, src_name, dst_parent_id)
+        for f in self.list_files(master_key, src_folder_id):
+            self.copy_file(master_key, f["id"], new_id)
+        for sub in self._folder_children(master_key, src_folder_id):
+            self.copy_folder(master_key, sub, new_id)
+        return new_id
 
     def delete_folder_for_user(self, master_key: bytes, folder_id: str) -> bool:
-        """删除文件夹：先把里面所有文件的 folder 字段清空（重新加密），再删除文件夹记录。"""
+        """递归删除文件夹：先删子孙文件夹（文件上浮到其父级），再删自身。"""
+        # 递归删除子文件夹
+        for sub in self._folder_children(master_key, folder_id):
+            self.delete_folder_for_user(master_key, sub)
+        # 本文件夹文件上浮到父级
+        parent = self._folder_parent(master_key, folder_id)
         with self._conn() as c:
-            # 找出文件夹下所有文件
             files = c.execute("SELECT id, folder_id_enc FROM files").fetchall()
-            for r in files:
-                try:
-                    current = decrypt_name(master_key, r["id"], r["folder_id_enc"]) if r["folder_id_enc"] else ""
-                except Exception:
-                    continue
-                if current == folder_id:
+        for r in files:
+            try:
+                current = decrypt_name(master_key, r["id"], r["folder_id_enc"]) if r["folder_id_enc"] else ""
+            except Exception:
+                continue
+            if current == folder_id:
+                with self._conn() as c:
                     c.execute(
                         "UPDATE files SET folder_id_enc=? WHERE id=?",
-                        (encrypt_name(master_key, r["id"], ""), r["id"]),
+                        (encrypt_name(master_key, r["id"], parent), r["id"]),
                     )
+        # 删除文件夹记录
+        with self._conn() as c:
             cur = c.execute("DELETE FROM folders WHERE id=?", (folder_id,))
             return cur.rowcount > 0
 
