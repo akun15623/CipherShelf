@@ -8,9 +8,11 @@ services:
     restart: unless-stopped
     environment:
       VAULT_DATA_DIR: /data
-      AUTO_LOCK_SECONDS: "1800"     # 30 分钟无操作自动锁定，0 表示关闭
+      VAULT_IMPORT_DIR: /import    # 导入目录：放待加密的明文文件，在网页「导入」里一键加密进保险箱
+      AUTO_LOCK_SECONDS: "1800"    # 30 分钟无操作自动锁定，0 表示关闭
       MAX_UPLOAD_MB: "4096"
     ports:
       - "6070:8080"
     volumes:
       - ./vault-data:/data
+      - ./import:/import           # 可选：把 NAS 上的明文文件放到这个目录，再导入加密

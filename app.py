@@ -21,9 +21,10 @@ from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File, 
 from fastapi.responses import Response, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from crypto import Vault, plaintext_size, decrypt_range
+from crypto import Vault, plaintext_size, decrypt_range, decrypt_name, decrypt_chunks
 
 DATA_DIR = os.environ.get("VAULT_DATA_DIR", "/data")
+IMPORT_DIR = os.environ.get("VAULT_IMPORT_DIR", "/import")
 AUTO_LOCK_SECONDS = int(os.environ.get("AUTO_LOCK_SECONDS", "1800"))  # 30 分钟无操作自动锁定
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "4096"))
 
@@ -343,3 +344,214 @@ def _parse_range(range_header: str, total: int):
         return start, end
     except (ValueError, AttributeError):
         return None, None
+
+
+# ---------------------------------------------------------------------------
+# 导入（把已有明文文件加密进保险箱）
+# ---------------------------------------------------------------------------
+def _import_items() -> list[dict]:
+    """递归列出导入目录下所有文件（含相对路径）。"""
+    if not os.path.isdir(IMPORT_DIR):
+        return []
+    items = []
+    for root, _dirs, files in os.walk(IMPORT_DIR):
+        for fn in files:
+            full = os.path.join(root, fn)
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue
+            rel = os.path.relpath(full, IMPORT_DIR).replace(os.sep, "/")
+            items.append({"rel": rel, "name": fn, "size": st.st_size, "mtime": int(st.st_mtime)})
+    items.sort(key=lambda x: x["rel"])
+    return items
+
+
+@app.get("/api/import/list")
+async def import_list(key: bytes = Depends(_get_key)):
+    return {"root": IMPORT_DIR, "available": os.path.isdir(IMPORT_DIR), "items": _import_items()}
+
+
+@app.post("/api/import")
+async def import_files(body: dict, key: bytes = Depends(_get_key)):
+    paths = body.get("paths") or []
+    folder_id = body.get("folder_id") or ""
+    delete_source = bool(body.get("delete_source"))
+    if not os.path.isdir(IMPORT_DIR):
+        raise HTTPException(status_code=400, detail="导入目录不可用（未挂载 VAULT_IMPORT_DIR）")
+    if not paths:
+        raise HTTPException(status_code=400, detail="未选择要导入的文件")
+    base = os.path.realpath(IMPORT_DIR)
+    ok = fail = 0
+    for rel in paths:
+        rel = (rel or "").replace("\\", "/").lstrip("/")
+        src = os.path.realpath(os.path.join(IMPORT_DIR, rel))
+        # 安全：必须仍位于导入目录内，防止路径穿越
+        if not (src == base or src.startswith(base + os.sep)) or not os.path.isfile(src):
+            fail += 1
+            continue
+        try:
+            parts = [p for p in rel.split("/")[:-1] if p not in ("", ".", "..")]
+            target = vault.ensure_folder_path(key, parts, folder_id) if parts else folder_id
+            mime = _guess_mime(rel)
+            fid = vault.add_file(key, src, os.path.basename(rel), mime, target)
+            if mime.startswith("image/"):
+                try:
+                    _make_thumbnail(key, fid)
+                except Exception:
+                    pass
+            if delete_source:
+                try:
+                    os.remove(src)
+                except OSError:
+                    pass
+            ok += 1
+        except Exception:
+            fail += 1
+    return {"ok": ok, "fail": fail}
+
+
+# ---------------------------------------------------------------------------
+# 批量操作
+# ---------------------------------------------------------------------------
+@app.post("/api/batch/delete")
+async def batch_delete(body: dict, key: bytes = Depends(_get_key)):
+    ids = body.get("ids") or []
+    folder_ids = body.get("folders") or []
+    removed_files = removed_folders = 0
+    for fid in ids:
+        if vault.delete_file(fid):
+            removed_files += 1
+    for foid in folder_ids:
+        if vault.delete_folder_for_user(key, foid):
+            removed_folders += 1
+    return {"files": removed_files, "folders": removed_folders}
+
+
+@app.post("/api/batch/move")
+async def batch_move(body: dict, key: bytes = Depends(_get_key)):
+    ids = body.get("ids") or []
+    folder_ids = body.get("folders") or []
+    target = body.get("target") or ""
+    moved = 0
+    for fid in ids:
+        if vault.move_file(key, fid, target):
+            moved += 1
+    for foid in folder_ids:
+        if vault.move_folder(key, foid, target):
+            moved += 1
+    return {"moved": moved}
+
+
+@app.post("/api/batch/copy")
+async def batch_copy(body: dict, key: bytes = Depends(_get_key)):
+    ids = body.get("ids") or []
+    folder_ids = body.get("folders") or []
+    target = body.get("target") or ""
+    copied = 0
+    for fid in ids:
+        if vault.copy_file(key, fid, target):
+            copied += 1
+    for foid in folder_ids:
+        if vault.copy_folder(key, foid, target):
+            copied += 1
+    return {"copied": copied}
+
+
+def _sanitize_arcname(name: str) -> str:
+    parts = [p for p in name.replace("\\", "/").split("/") if p not in ("", ".", "..")]
+    return "/".join(parts) or "file"
+
+
+@app.get("/api/batch/download")
+async def batch_download(files: str = "", folders: str = "", key: bytes = Depends(_get_key)):
+    import zipfile
+    file_ids = [x for x in files.split(",") if x]
+    folder_ids = [x for x in folders.split(",") if x]
+
+    # 建立 文件夹 id -> 路径 映射
+    fl = vault.list_folders(key)
+    path_of: dict[str, str] = {}
+
+    def fpath(fid: str) -> str:
+        if fid in path_of:
+            return path_of[fid]
+        f = next((x for x in fl if x["id"] == fid), None)
+        if not f:
+            return ""
+        if f["parent_id"]:
+            p = fpath(f["parent_id"])
+            path_of[fid] = (p + "/" + f["name"]) if p else f["name"]
+        else:
+            path_of[fid] = f["name"]
+        return path_of[fid]
+
+    entries: list[tuple[str, str]] = []  # (arcname, file_id)
+    for fid in file_ids:
+        rec = vault.get_record(fid)
+        if not rec:
+            continue
+        entries.append((decrypt_name(key, fid, rec["name_enc"]), fid))
+
+    if folder_ids:
+        all_files = vault.list_all_files(key)
+        for foid in folder_ids:
+            prefix = fpath(foid)
+            subtree = set(vault.folder_subtree_ids(key, foid))
+            for f in all_files:
+                if f["folder_id"] in subtree:
+                    rel = ""
+                    if f["folder_id"] != foid:
+                        fp = fpath(f["folder_id"])
+                        if fp.startswith(prefix):
+                            rel = fp[len(prefix):].lstrip("/")
+                        else:
+                            rel = fp
+                    arc = f"{prefix}/{rel}/{f['name']}" if rel else f"{prefix}/{f['name']}"
+                    entries.append((arc, f["id"]))
+
+    if not entries:
+        raise HTTPException(status_code=404, detail="没有可下载的文件")
+
+    tmp_dir = os.path.join(DATA_DIR, "tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+    tmp = os.path.join(tmp_dir, "dl-" + uuid.uuid4().hex + ".zip")
+    seen: set[str] = set()
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as zf:
+            for arc, fid in entries:
+                arc = _sanitize_arcname(arc)
+                base, i = arc, 1
+                while arc in seen:
+                    stem, ext = os.path.splitext(base)
+                    arc = f"{stem} ({i}){ext}"
+                    i += 1
+                seen.add(arc)
+                path = vault.get_file_path(fid)
+                with zf.open(arc, "w", force_zip64=True) as dest:
+                    for chunk in decrypt_chunks(key, fid, path):
+                        dest.write(chunk)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+    def iter_file():
+        with open(tmp, "rb") as f:
+            while True:
+                b = f.read(1024 * 1024)
+                if not b:
+                    break
+                yield b
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+    return StreamingResponse(
+        iter_file(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="vault-export.zip"'},
+    )

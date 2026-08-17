@@ -205,6 +205,19 @@ def decrypt_full(master_key: bytes, file_id: str, path: str) -> bytes:
     return decrypt_range(master_key, file_id, path, 0, total)
 
 
+def decrypt_chunks(master_key: bytes, file_id: str, path: str, chunk_size: int = 4 * 1024 * 1024):
+    """流式解密整个文件，按 chunk_size 字节分块 yield。
+
+    用于批量导出（zip 下载 / 离线解密 CLI），避免把大文件整个读进内存。
+    """
+    total = plaintext_size(master_key, file_id, path)
+    offset = 0
+    while offset < total:
+        n = min(chunk_size, total - offset)
+        yield decrypt_range(master_key, file_id, path, offset, n)
+        offset += n
+
+
 def plaintext_size(master_key: bytes, file_id: str, path: str) -> int:
     """根据密文文件大小反推明文大小（不真正解密全文件）。"""
     with open(path, "rb") as f:
@@ -583,3 +596,45 @@ class Vault:
             except OSError:
                 pass
         return deleted
+
+    # -- 批量 / 导入 / 导出辅助 -------------------------------------------
+    def list_all_files(self, master_key: bytes) -> list[dict]:
+        """返回所有文件（含各自 folder_id），用于批量下载/离线导出。"""
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM files ORDER BY created DESC").fetchall()
+        out = []
+        for r in rows:
+            f_folder = decrypt_name(master_key, r["id"], r["folder_id_enc"]) if r["folder_id_enc"] else ""
+            out.append({
+                "id": r["id"],
+                "name": decrypt_name(master_key, r["id"], r["name_enc"]),
+                "mime": decrypt_name(master_key, r["id"], r["mime_enc"]),
+                "size": r["size"],
+                "created": r["created"],
+                "has_thumb": bool(r["thumb"]),
+                "folder_id": f_folder,
+            })
+        return out
+
+    def folder_subtree_ids(self, master_key: bytes, folder_id: str) -> list[str]:
+        """返回 folder_id 及其所有子孙文件夹 id（含自身）。"""
+        ids = [folder_id]
+        for ch in self._folder_children(master_key, folder_id):
+            ids.extend(self.folder_subtree_ids(master_key, ch))
+        return ids
+
+    def _find_child_folder(self, master_key: bytes, parent_id: str, name: str) -> str | None:
+        for cid in self._folder_children(master_key, parent_id):
+            if self._folder_name(master_key, cid) == name:
+                return cid
+        return None
+
+    def ensure_folder_path(self, master_key: bytes, parts: list[str], parent_id: str = "") -> str:
+        """按路径段逐级创建/查找文件夹（用于导入时镜像目录结构），返回叶子文件夹 id。"""
+        cur = parent_id
+        for name in parts:
+            name = (name or "").strip()
+            if not name:
+                continue
+            cur = self._find_child_folder(master_key, cur, name) or self.create_folder(master_key, name, cur)
+        return cur
