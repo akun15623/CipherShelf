@@ -1,0 +1,16 @@
+name: secure-vault
+
+services:
+  secure-vault:
+    build: .
+    image: secure-vault:latest
+    container_name: secure-vault
+    restart: unless-stopped
+    environment:
+      VAULT_DATA_DIR: /data
+      AUTO_LOCK_SECONDS: "1800"     # 30 分钟无操作自动锁定，0 表示关闭
+      MAX_UPLOAD_MB: "4096"
+    ports:
+      - "6070:8080"
+    volumes:
+      - ./vault-data:/data

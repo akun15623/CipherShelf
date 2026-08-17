@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>保险箱 · Secure Vault</title>
+  <link rel="stylesheet" href="/static/element-plus.css">
+  <style>
+    :root { --bg: #0f1420; --card: #1a2130; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: var(--bg); color: #e6e8ee; min-height: 100vh;
+    }
+    .lock-wrap { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
+    .lock-card { width: 100%; max-width: 400px; background: var(--card); border-radius: 16px; padding: 40px 32px; text-align: center; }
+    .lock-icon { font-size: 56px; margin-bottom: 8px; }
+    .lock-title { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
+    .lock-sub { color: #8a93a6; font-size: 13px; margin-bottom: 28px; }
+    .app-header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; background: var(--card); border-bottom: 1px solid #262f42; position: sticky; top: 0; z-index: 10; }
+    .app-title { font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+    .spacer { flex: 1; }
+    .app-body { padding: 20px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 14px; }
+    .cell { background: var(--card); border-radius: 12px; overflow: hidden; cursor: pointer; transition: transform .15s, box-shadow .15s; position: relative; }
+    .cell:hover { transform: translateY(-3px); box-shadow: 0 8px 24px rgba(0,0,0,.4); }
+    .cell .thumb { width: 100%; aspect-ratio: 1; object-fit: cover; background: #121826; display: flex; align-items: center; justify-content: center; font-size: 42px; }
+    .cell .meta { padding: 8px 10px; }
+    .cell .name { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .cell .size { font-size: 11px; color: #8a93a6; margin-top: 2px; }
+    .cell .del { position: absolute; top: 6px; right: 6px; opacity: 0; transition: opacity .15s; }
+    .cell:hover .del { opacity: 1; }
+    .list-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--card); border-radius: 10px; margin-bottom: 8px; cursor: pointer; }
+    .list-row .icon { font-size: 26px; width: 40px; text-align: center; }
+    .list-row .lname { flex: 1; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .list-row .lsize { color: #8a93a6; font-size: 12px; }
+    .empty { text-align: center; color: #8a93a6; padding: 80px 0; }
+    .empty .big { font-size: 60px; }
+    .player-dialog .el-dialog__body { padding: 0; }
+    video, audio { width: 100%; display: block; }
+    .video-wrap { background: #000; }
+  </style>
+</head>
+<body>
+<div id="app">
+  <!-- ============ 锁屏 ============ -->
+  <div v-if="!unlocked" class="lock-wrap">
+    <div class="lock-card">
+      <div class="lock-icon">🔐</div>
+      <div class="lock-title">{{ initialized ? '解锁保险箱' : '创建保险箱' }}</div>
+      <div class="lock-sub">{{ initialized ? '输入密码以查看加密文件' : '首次使用，请设置一个密码' }}</div>
+      <el-form @submit.prevent>
+        <el-input v-model="password" type="password" show-password size="large"
+                  :placeholder="initialized ? '密码' : '设置密码（至少 8 位）'"
+                  @keyup.enter="initialized ? doUnlock() : doInit()" />
+        <el-input v-if="!initialized" v-model="password2" type="password" show-password size="large"
+                  placeholder="确认密码" style="margin-top: 12px;" @keyup.enter="doInit()" />
+        <el-button type="primary" size="large" style="width:100%; margin-top:20px"
+                   :loading="busy" @click="initialized ? doUnlock() : doInit()">
+          {{ initialized ? '解锁' : '创建并进入' }}
+        </el-button>
+      </el-form>
+      <div v-if="err" style="color:#f56c6c; font-size:13px; margin-top:14px;">{{ err }}</div>
+      <div v-if="!initialized" style="color:#8a93a6; font-size:12px; margin-top:16px; line-height:1.6;">
+        ⚠️ 密码是唯一钥匙，忘记将无法找回（数据将永久不可读）。
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 主界面 ============ -->
+  <div v-else>
+    <div class="app-header">
+      <div class="app-title">🔐 保险箱</div>
+      <el-radio-group v-model="viewMode" size="small">
+        <el-radio-button value="grid">宫格</el-radio-button>
+        <el-radio-button value="list">列表</el-radio-button>
+      </el-radio-group>
+      <div class="spacer"></div>
+      <el-button size="small" @click="refresh">刷新</el-button>
+      <el-button type="primary" size="small" @click="uploadVisible = true">上传</el-button>
+      <el-button size="small" @click="doLock">锁定</el-button>
+    </div>
+
+    <div class="app-body">
+      <!-- 宫格 -->
+      <div v-if="viewMode === 'grid'" class="grid">
+        <div v-for="f in files" :key="f.id" class="cell">
+          <el-image v-if="isImg(f)" class="thumb" :src="thumbUrl(f)"
+                    :preview-src-list="imgPreviewList" :initial-index="imgIndexOf(f.id)"
+                    preview-teleported fit="cover" lazy>
+            <template #error><div class="thumb">🖼️</div></template>
+          </el-image>
+          <div v-else class="thumb" @click="open(f)">{{ iconFor(f.mime) }}</div>
+          <div class="meta">
+            <div class="name" :title="f.name">{{ f.name }}</div>
+            <div class="size">{{ fmtSize(f.size) }}</div>
+          </div>
+          <el-button class="del" size="small" circle type="danger" @click.stop="del(f)">✕</el-button>
+        </div>
+      </div>
+      <!-- 列表 -->
+      <div v-else>
+        <div v-for="f in files" :key="f.id" class="list-row" @click="open(f)">
+          <div class="icon">{{ iconFor(f.mime) }}</div>
+          <div class="lname">{{ f.name }}</div>
+          <div class="lsize">{{ fmtSize(f.size) }}</div>
+          <el-button size="small" type="danger" text @click.stop="del(f)">删除</el-button>
+        </div>
+      </div>
+      <div v-if="files.length === 0" class="empty">
+        <div class="big">📂</div>
+        <div style="margin-top:12px;">保险箱是空的，点击右上角「上传」添加文件</div>
+      </div>
+    </div>
+
+    <!-- 视频/音频播放 -->
+    <el-dialog v-model="playerVisible" :title="playerName" class="player-dialog" width="760px" destroy-on-close>
+      <div class="video-wrap">
+        <video v-if="isVideo" :src="playerUrl" controls autoplay style="max-height:70vh;"></video>
+        <audio v-else :src="playerUrl" controls autoplay style="width:100%; padding:20px;"></audio>
+      </div>
+    </el-dialog>
+
+    <!-- 上传 -->
+    <el-dialog v-model="uploadVisible" title="上传文件" width="480px">
+      <el-upload drag multiple :auto-upload="false" :limit="20" :on-change="onPick" :show-file-list="true">
+        <div style="font-size:44px;">📤</div>
+        <div style="margin-top:8px;">拖拽文件到此处，或点击选择</div>
+      </el-upload>
+      <div style="margin-top:14px; text-align:right;">
+        <el-button @click="uploadVisible=false">取消</el-button>
+        <el-button type="primary" :loading="uploading" @click="doUpload">开始上传</el-button>
+      </div>
+    </el-dialog>
+  </div>
+</div>
+
+<script src="/static/vue.global.prod.js"></script>
+<script src="/static/element-plus.full.min.js"></script>
+<script>
+const { createApp, ref, computed, onMounted } = Vue;
+const { ElMessage, ElMessageBox } = ElementPlus;
+
+const app = createApp({
+  setup() {
+    const initialized = ref(false);
+    const unlocked = ref(false);
+    const password = ref('');
+    const password2 = ref('');
+    const busy = ref(false);
+    const err = ref('');
+
+    const files = ref([]);
+    const viewMode = ref('grid');
+    const uploadVisible = ref(false);
+    const uploading = ref(false);
+    const pickedFiles = ref([]);
+
+    const playerVisible = ref(false);
+    const playerName = ref('');
+    const playerUrl = ref('');
+    const isVideo = ref(false);
+
+    const imgPreviewList = computed(() =>
+      files.value.filter(x => x.mime.startsWith('image/')).map(x => '/api/file/' + x.id)
+    );
+
+    async function api(path, opts = {}) {
+      const res = await fetch(path, {
+        credentials: 'include',
+        headers: opts.body ? { 'Content-Type': 'application/json' } : {},
+        ...opts,
+      });
+      if (res.status === 401) { unlocked.value = false; throw new Error('未解锁'); }
+      if (!res.ok) {
+        let detail = '请求失败';
+        try { detail = (await res.json()).detail || detail; } catch (e) {}
+        throw new Error(detail);
+      }
+      return res.json();
+    }
+
+    async function checkStatus() {
+      try {
+        const s = await fetch('/api/status', { credentials: 'include' }).then(r => r.json());
+        initialized.value = s.initialized;
+        try {
+          await api('/api/files');
+          unlocked.value = true;
+          await refresh();
+        } catch (e) { unlocked.value = false; }
+      } catch (e) {}
+    }
+
+    async function doInit() {
+      err.value = '';
+      if (password.value.length < 8) { err.value = '密码至少 8 位'; return; }
+      if (password.value !== password2.value) { err.value = '两次密码不一致'; return; }
+      busy.value = true;
+      try {
+        await api('/api/init', { method: 'POST', body: JSON.stringify({ password: password.value }) });
+        await doUnlock();
+      } catch (e) { err.value = e.message; }
+      finally { busy.value = false; }
+    }
+
+    async function doUnlock() {
+      err.value = '';
+      busy.value = true;
+      try {
+        await api('/api/unlock', { method: 'POST', body: JSON.stringify({ password: password.value }) });
+        password.value = '';
+        password2.value = '';
+        unlocked.value = true;
+        await refresh();
+      } catch (e) { err.value = e.message; }
+      finally { busy.value = false; }
+    }
+
+    async function doLock() {
+      try { await api('/api/lock', { method: 'POST' }); } catch (e) {}
+      unlocked.value = false;
+      files.value = [];
+    }
+
+    async function refresh() {
+      try {
+        const r = await api('/api/files');
+        files.value = r.files;
+      } catch (e) { if (e.message === '未解锁') unlocked.value = false; }
+    }
+
+    function onPick(file) { pickedFiles.value.push(file.raw); }
+
+    async function doUpload() {
+      if (pickedFiles.value.length === 0) return;
+      uploading.value = true;
+      let ok = 0, fail = 0;
+      for (const f of pickedFiles.value) {
+        try {
+          const fd = new FormData();
+          fd.append('file', f);
+          const res = await fetch('/api/upload', { method: 'POST', body: fd, credentials: 'include' });
+          if (res.ok) ok++; else fail++;
+        } catch (e) { fail++; }
+      }
+      uploading.value = false;
+      pickedFiles.value = [];
+      uploadVisible.value = false;
+      ElMessage.success(`上传完成：成功 ${ok} 个` + (fail ? `，失败 ${fail} 个` : ''));
+      await refresh();
+    }
+
+    function isImg(f) { return f.mime.startsWith('image/'); }
+    function thumbUrl(f) { return '/api/file/' + f.id + '/thumb'; }
+    function imgIndexOf(id) {
+      const imgs = files.value.filter(x => x.mime.startsWith('image/'));
+      const i = imgs.findIndex(x => x.id === id);
+      return i < 0 ? 0 : i;
+    }
+
+    function iconFor(mime) {
+      if (mime.startsWith('video/')) return '🎬';
+      if (mime.startsWith('audio/')) return '🎵';
+      if (mime.startsWith('image/')) return '🖼️';
+      if (mime.includes('pdf')) return '📄';
+      if (mime.includes('zip') || mime.includes('rar') || mime.includes('7z')) return '📦';
+      if (mime.includes('text') || mime.includes('json')) return '📝';
+      return '📁';
+    }
+
+    function open(f) {
+      if (f.mime.startsWith('video/') || f.mime.startsWith('audio/')) {
+        playerName.value = f.name;
+        playerUrl.value = '/api/file/' + f.id;
+        isVideo.value = f.mime.startsWith('video/');
+        playerVisible.value = true;
+      } else {
+        window.open('/api/file/' + f.id, '_blank');
+      }
+    }
+
+    async function del(f) {
+      try {
+        await ElMessageBox.confirm(`确定删除「${f.name}」？此操作不可恢复。`, '删除', { type: 'warning' });
+      } catch (e) { return; }
+      try {
+        await api('/api/file/' + f.id, { method: 'DELETE' });
+        ElMessage.success('已删除');
+        await refresh();
+      } catch (e) { ElMessage.error(e.message); }
+    }
+
+    function fmtSize(n) {
+      if (n < 1024) return n + ' B';
+      if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+      if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+      return (n / 1073741824).toFixed(2) + ' GB';
+    }
+
+    onMounted(checkStatus);
+
+    return {
+      initialized, unlocked, password, password2, busy, err,
+      files, viewMode, uploadVisible, uploading, pickedFiles,
+      playerVisible, playerName, playerUrl, isVideo, imgPreviewList,
+      doInit, doUnlock, doLock, refresh, onPick, doUpload,
+      isImg, thumbUrl, imgIndexOf, iconFor, open, del, fmtSize,
+    };
+  },
+});
+app.use(ElementPlus);
+app.mount('#app');
+</script>
+</body>
+</html>
