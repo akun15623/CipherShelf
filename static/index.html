@@ -378,6 +378,17 @@ const TEMPLATE = `
           </template>
         </div>
         <div class="header-actions">
+          <el-dropdown trigger="click" @command="setSort">
+            <el-button size="small">{{ sortLabel }} ▾</el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item :disabled="sortKey === 'name-asc'" command="name-asc">名称 ↑ (A→Z)</el-dropdown-item>
+                <el-dropdown-item :disabled="sortKey === 'name-desc'" command="name-desc">名称 ↓ (Z→A)</el-dropdown-item>
+                <el-dropdown-item :disabled="sortKey === 'time-desc'" command="time-desc" divided>时间 ↓ (新→旧)</el-dropdown-item>
+                <el-dropdown-item :disabled="sortKey === 'time-asc'" command="time-asc">时间 ↑ (旧→新)</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
           <el-radio-group v-model="viewMode" size="small">
             <el-radio-button value="grid">宫格</el-radio-button>
             <el-radio-button value="list">列表</el-radio-button>
@@ -403,7 +414,7 @@ const TEMPLATE = `
         </div>
 
         <div v-if="viewMode === 'grid'" class="grid">
-          <div v-for="f in foldersInCurrent" :key="'d'+f.id" class="cell folder-cell" @dblclick="navigateFolder(f.id)">
+          <div v-for="f in sortedFolders" :key="'d'+f.id" class="cell folder-cell" @dblclick="navigateFolder(f.id)">
             <div class="thumb" @click="navigateFolder(f.id)">📁</div>
             <div class="meta" @click="navigateFolder(f.id)">
               <div class="name" :title="f.name">{{ f.name }}</div>
@@ -424,7 +435,7 @@ const TEMPLATE = `
               </template>
             </el-dropdown>
           </div>
-          <div v-for="f in files" :key="f.id" class="cell" @dblclick="open(f)">
+          <div v-for="f in sortedFiles" :key="f.id" class="cell" @dblclick="open(f)">
             <el-image v-if="isImg(f)" class="thumb" :src="thumbUrl(f)" fit="cover" lazy @click="open(f)">
               <template #error><div class="thumb">🖼️</div></template>
             </el-image>
@@ -449,7 +460,7 @@ const TEMPLATE = `
         </div>
 
         <div v-else>
-          <div v-for="f in foldersInCurrent" :key="'d'+f.id" class="list-row" @click="navigateFolder(f.id)">
+          <div v-for="f in sortedFolders" :key="'d'+f.id" class="list-row" @click="navigateFolder(f.id)">
             <el-checkbox :model-value="selectedFolders.includes(f.id)" @click.stop @change="toggleFolderSelect(f.id)" />
             <div class="icon">📁</div>
             <div class="lname">{{ f.name }}</div>
@@ -458,7 +469,7 @@ const TEMPLATE = `
             <el-button size="small" text @click.stop="openTransfer('copy', [{type:'folder', id:f.id}])">复制</el-button>
             <el-button size="small" type="danger" text @click.stop="folderCommand('delete', f)">删除</el-button>
           </div>
-          <div v-for="f in files" :key="f.id" class="list-row" @click="open(f)">
+          <div v-for="f in sortedFiles" :key="f.id" class="list-row" @click="open(f)">
             <el-checkbox :model-value="selected.includes(f.id)" @click.stop @change="toggleSelect(f.id)" />
             <div class="icon">{{ iconFor(f.mime) }}</div>
             <div class="lname">{{ f.name }}</div>
@@ -645,6 +656,35 @@ const app = createApp({
     const allFolderIds = computed(() => folders.value.map(f => f.id));
 
     const foldersInCurrent = computed(() => folders.value.filter(f => f.parent_id === currentFolderId.value));
+
+    // ---- 排序 ----
+    const sortKey = ref('time-desc');   // 'name-asc' | 'name-desc' | 'time-asc' | 'time-desc'
+    const sortLabel = computed(() => ({
+      'name-asc': '名称 ↑',
+      'name-desc': '名称 ↓',
+      'time-asc': '时间 ↑',
+      'time-desc': '时间 ↓',
+    })[sortKey.value] || '排序');
+
+    function _cmp(a, b) {
+      if (a < b) return -1;
+      if (a > b) return 1;
+      return 0;
+    }
+    function sortFn(sk) {
+      const [field, dir] = sk.split('-');
+      const sign = dir === 'asc' ? 1 : -1;
+      return (a, b) => {
+        let r;
+        if (field === 'name') r = _cmp(String(a.name).toLowerCase(), String(b.name).toLowerCase());
+        else r = _cmp(a.created || 0, b.created || 0);
+        if (r === 0) r = _cmp(String(a.name).toLowerCase(), String(b.name).toLowerCase()); // 次级稳定排序
+        return r * sign;
+      };
+    }
+    const sortedFiles = computed(() => [...files.value].sort(sortFn(sortKey.value)));
+    const sortedFolders = computed(() => [...foldersInCurrent.value].sort(sortFn(sortKey.value)));
+    function setSort(key) { sortKey.value = key; }
 
     const breadcrumbItems = computed(() => {
       const items = [];
@@ -1081,6 +1121,7 @@ const app = createApp({
       initialized, unlocked, password, password2, busy, err,
       folders, files, currentFolderId, currentFolderName, breadcrumbItems,
       folderTree, allFolderIds, foldersLoaded, foldersInCurrent,
+      sortedFiles, sortedFolders, sortKey, sortLabel, setSort,
       viewMode, uploadVisible, uploading, pickedFiles,
       playerVisible, playerName, playerUrl,
       newFolderVisible, newFolderName, newFolderParent,
