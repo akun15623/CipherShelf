@@ -42,23 +42,46 @@
   </style>
 </head>
 <body>
-<div id="app">
-  <!-- ============ 锁屏 ============ -->
+<div id="app"></div>
+
+<script src="/static/vue.global.prod.js"></script>
+<script src="/static/element-plus.full.min.js"></script>
+<script>
+if (typeof Vue === 'undefined') {
+  document.getElementById('app').innerHTML = '<div style="display:flex;align-items:center;justify-content:center;min-height:100vh;color:#f56c6c;font-size:16px;">Vue.js 加载失败</div>';
+  throw new Error('Vue not loaded');
+}
+if (typeof ElementPlus === 'undefined') {
+  document.getElementById('app').innerHTML = '<div style="display:flex;align-items:center;justify-content:center;min-height:100vh;color:#f56c6c;font-size:16px;">Element Plus 加载失败</div>';
+  throw new Error('ElementPlus not loaded');
+}
+
+const { createApp, ref, computed, onMounted } = Vue;
+const { ElMessage, ElMessageBox } = ElementPlus;
+
+// 模板用 JS 字符串，避免浏览器 in-DOM 解析问题
+const TEMPLATE = `
   <div v-if="!unlocked" class="lock-wrap">
     <div class="lock-card">
       <div class="lock-icon">🔐</div>
       <div class="lock-title">{{ initialized ? '解锁保险箱' : '创建保险箱' }}</div>
       <div class="lock-sub">{{ initialized ? '输入密码以查看加密文件' : '首次使用，请设置一个密码' }}</div>
       <el-form @submit.prevent>
-        <el-input v-model="password" type="password" show-password size="large"
-                  :placeholder="initialized ? '密码' : '设置密码（至少 8 位）'"
-                  @keyup.enter="initialized ? doUnlock() : doInit()" />
-        <el-input v-if="!initialized" v-model="password2" type="password" show-password size="large"
-                  placeholder="确认密码" style="margin-top: 12px;" @keyup.enter="doInit()" />
-        <el-button type="primary" size="large" style="width:100%; margin-top:20px"
-                   :loading="busy" @click="initialized ? doUnlock() : doInit()">
-          {{ initialized ? '解锁' : '创建并进入' }}
-        </el-button>
+        <el-form-item>
+          <el-input v-model="password" type="password" show-password size="large"
+                    :placeholder="initialized ? '密码' : '设置密码（至少 8 位）'"
+                    @keyup.enter="initialized ? doUnlock() : doInit()" />
+        </el-form-item>
+        <el-form-item v-if="!initialized">
+          <el-input v-model="password2" type="password" show-password size="large"
+                    placeholder="确认密码" @keyup.enter="doInit()" />
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" size="large" style="width:100%"
+                     :loading="busy" @click="initialized ? doUnlock() : doInit()">
+            {{ initialized ? '解锁' : '创建并进入' }}
+          </el-button>
+        </el-form-item>
       </el-form>
       <div v-if="err" style="color:#f56c6c; font-size:13px; margin-top:14px;">{{ err }}</div>
       <div v-if="!initialized" style="color:#8a93a6; font-size:12px; margin-top:16px; line-height:1.6;">
@@ -67,7 +90,6 @@
     </div>
   </div>
 
-  <!-- ============ 主界面 ============ -->
   <div v-else>
     <div class="app-header">
       <div class="app-title">🔐 保险箱</div>
@@ -82,7 +104,6 @@
     </div>
 
     <div class="app-body">
-      <!-- 宫格 -->
       <div v-if="viewMode === 'grid'" class="grid">
         <div v-for="f in files" :key="f.id" class="cell">
           <el-image v-if="isImg(f)" class="thumb" :src="thumbUrl(f)"
@@ -98,7 +119,6 @@
           <el-button class="del" size="small" circle type="danger" @click.stop="del(f)">✕</el-button>
         </div>
       </div>
-      <!-- 列表 -->
       <div v-else>
         <div v-for="f in files" :key="f.id" class="list-row" @click="open(f)">
           <div class="icon">{{ iconFor(f.mime) }}</div>
@@ -113,7 +133,6 @@
       </div>
     </div>
 
-    <!-- 视频/音频播放 -->
     <el-dialog v-model="playerVisible" :title="playerName" class="player-dialog" width="760px" destroy-on-close>
       <div class="video-wrap">
         <video v-if="isVideo" :src="playerUrl" controls autoplay style="max-height:70vh;"></video>
@@ -121,7 +140,6 @@
       </div>
     </el-dialog>
 
-    <!-- 上传 -->
     <el-dialog v-model="uploadVisible" title="上传文件" width="480px">
       <el-upload drag multiple :auto-upload="false" :limit="20" :on-change="onPick" :show-file-list="true">
         <div style="font-size:44px;">📤</div>
@@ -133,15 +151,10 @@
       </div>
     </el-dialog>
   </div>
-</div>
-
-<script src="/static/vue.global.prod.js"></script>
-<script src="/static/element-plus.full.min.js"></script>
-<script>
-const { createApp, ref, computed, onMounted } = Vue;
-const { ElMessage, ElMessageBox } = ElementPlus;
+`;
 
 const app = createApp({
+  template: TEMPLATE,
   setup() {
     const initialized = ref(false);
     const unlocked = ref(false);
@@ -149,13 +162,11 @@ const app = createApp({
     const password2 = ref('');
     const busy = ref(false);
     const err = ref('');
-
     const files = ref([]);
     const viewMode = ref('grid');
     const uploadVisible = ref(false);
     const uploading = ref(false);
     const pickedFiles = ref([]);
-
     const playerVisible = ref(false);
     const playerName = ref('');
     const playerUrl = ref('');
@@ -221,6 +232,11 @@ const app = createApp({
       try { await api('/api/lock', { method: 'POST' }); } catch (e) {}
       unlocked.value = false;
       files.value = [];
+      // 刷新 initialized 状态，确保锁屏显示"解锁"而非"创建"
+      try {
+        const s = await fetch('/api/status', { credentials: 'include' }).then(r => r.json());
+        initialized.value = s.initialized;
+      } catch (e) {}
     }
 
     async function refresh() {
