@@ -6,39 +6,224 @@
   <title>保险箱 · Secure Vault</title>
   <link rel="stylesheet" href="/static/element-plus.css">
   <style>
-    :root { --bg: #0f1420; --card: #1a2130; }
+    :root {
+      --bg: #0f1420;
+      --card: #1a2130;
+      --card-hover: #232b3d;
+      --border: #262f42;
+      --text: #e6e8ee;
+      --text-dim: #8a93a6;
+      --accent: #409eff;
+    }
     * { box-sizing: border-box; }
     body {
-      margin: 0; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-      background: var(--bg); color: #e6e8ee; min-height: 100vh;
+      margin: 0;
+      font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow-x: hidden;
     }
+
+    /* ============ 锁屏 ============ */
     .lock-wrap { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
     .lock-card { width: 100%; max-width: 400px; background: var(--card); border-radius: 16px; padding: 40px 32px; text-align: center; }
     .lock-icon { font-size: 56px; margin-bottom: 8px; }
     .lock-title { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
-    .lock-sub { color: #8a93a6; font-size: 13px; margin-bottom: 28px; }
-    .app-header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; background: var(--card); border-bottom: 1px solid #262f42; position: sticky; top: 0; z-index: 10; }
-    .app-title { font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
-    .spacer { flex: 1; }
-    .app-body { padding: 20px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 14px; }
-    .cell { background: var(--card); border-radius: 12px; overflow: hidden; cursor: pointer; transition: transform .15s, box-shadow .15s; position: relative; }
-    .cell:hover { transform: translateY(-3px); box-shadow: 0 8px 24px rgba(0,0,0,.4); }
-    .cell .thumb { width: 100%; aspect-ratio: 1; object-fit: cover; background: #121826; display: flex; align-items: center; justify-content: center; font-size: 42px; }
-    .cell .meta { padding: 8px 10px; }
-    .cell .name { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .cell .size { font-size: 11px; color: #8a93a6; margin-top: 2px; }
-    .cell .del { position: absolute; top: 6px; right: 6px; opacity: 0; transition: opacity .15s; }
+    .lock-sub { color: var(--text-dim); font-size: 13px; margin-bottom: 28px; }
+
+    /* ============ 主布局 ============ */
+    .app-shell { display: flex; height: 100vh; }
+
+    /* 侧边栏 */
+    .sidebar {
+      width: 240px;
+      background: var(--card);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      transition: transform .25s ease;
+    }
+    .sidebar-header {
+      padding: 14px 16px;
+      font-size: 16px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .sidebar-body { flex: 1; overflow-y: auto; padding: 8px; }
+    .sidebar-actions { padding: 12px; border-top: 1px solid var(--border); }
+    .folder-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      margin-bottom: 4px;
+      transition: background .15s;
+      user-select: none;
+    }
+    .folder-item:hover { background: var(--card-hover); }
+    .folder-item.active { background: var(--accent); color: #fff; }
+    .folder-item .icon { font-size: 18px; flex-shrink: 0; }
+    .folder-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+    .folder-item .menu-btn {
+      opacity: 0;
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      border: none;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .folder-item:hover .menu-btn { opacity: .7; }
+    .folder-item .menu-btn:hover { opacity: 1; background: rgba(255,255,255,.15); }
+    .folder-item.active .menu-btn { color: #fff; }
+
+    /* 主区 */
+    .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    .app-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+    .menu-btn-header {
+      display: none;
+      background: transparent;
+      border: none;
+      color: var(--text);
+      font-size: 20px;
+      cursor: pointer;
+      padding: 4px 8px;
+    }
+    .app-title { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+    .breadcrumb {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 13px;
+      color: var(--text-dim);
+      flex: 1;
+      min-width: 0;
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+    .breadcrumb::-webkit-scrollbar { display: none; }
+    .crumb {
+      cursor: pointer;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .crumb:hover { background: var(--card-hover); color: var(--text); }
+    .crumb.current { color: var(--text); font-weight: 600; cursor: default; }
+    .crumb.current:hover { background: transparent; }
+    .crumb-sep { color: var(--text-dim); opacity: .5; }
+    .header-actions { display: flex; align-items: center; gap: 6px; }
+    .app-body { flex: 1; overflow-y: auto; padding: 16px; }
+
+    /* 网格 */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 12px;
+    }
+    .cell {
+      background: var(--card);
+      border-radius: 12px;
+      overflow: hidden;
+      cursor: pointer;
+      transition: transform .15s, box-shadow .15s;
+      position: relative;
+    }
+    .cell:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,.4); }
+    .cell .thumb {
+      width: 100%;
+      aspect-ratio: 1;
+      object-fit: cover;
+      background: #121826;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 38px;
+    }
+    .cell .meta { padding: 6px 8px; }
+    .cell .name { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .cell .size { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
+    .cell .del {
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      opacity: 0;
+      transition: opacity .15s;
+    }
     .cell:hover .del { opacity: 1; }
-    .list-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--card); border-radius: 10px; margin-bottom: 8px; cursor: pointer; }
-    .list-row .icon { font-size: 26px; width: 40px; text-align: center; }
-    .list-row .lname { flex: 1; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .list-row .lsize { color: #8a93a6; font-size: 12px; }
-    .empty { text-align: center; color: #8a93a6; padding: 80px 0; }
-    .empty .big { font-size: 60px; }
+    .cell .move-btn {
+      position: absolute;
+      top: 4px;
+      right: 32px;
+      opacity: 0;
+      transition: opacity .15s;
+    }
+    .cell:hover .move-btn { opacity: 1; }
+
+    /* 列表 */
+    .list-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      background: var(--card);
+      border-radius: 10px;
+      margin-bottom: 6px;
+      cursor: pointer;
+    }
+    .list-row .icon { font-size: 22px; width: 32px; text-align: center; flex-shrink: 0; }
+    .list-row .lname { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .list-row .lsize { color: var(--text-dim); font-size: 11px; flex-shrink: 0; }
+
+    .empty { text-align: center; color: var(--text-dim); padding: 60px 0; }
+    .empty .big { font-size: 50px; }
+
+    /* 视频/音频播放器 */
     .player-dialog .el-dialog__body { padding: 0; }
     video, audio { width: 100%; display: block; }
     .video-wrap { background: #000; }
+
+    /* 移动端 */
+    .sidebar-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.5);
+      z-index: 99;
+    }
+    @media (max-width: 768px) {
+      .sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        z-index: 100;
+        transform: translateX(-100%);
+      }
+      .sidebar.open { transform: translateX(0); }
+      .sidebar-backdrop.show { display: block; }
+      .menu-btn-header { display: inline-block; }
+      .grid { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; }
+      .app-body { padding: 12px; }
+      .app-header { padding: 10px 12px; }
+      .breadcrumb { font-size: 12px; }
+    }
   </style>
 </head>
 <body>
@@ -56,10 +241,9 @@ if (typeof ElementPlus === 'undefined') {
   throw new Error('ElementPlus not loaded');
 }
 
-const { createApp, ref, computed, onMounted } = Vue;
+const { createApp, ref, computed, onMounted, watch } = Vue;
 const { ElMessage, ElMessageBox } = ElementPlus;
 
-// 模板用 JS 字符串，避免浏览器 in-DOM 解析问题
 const TEMPLATE = `
   <div v-if="!unlocked" class="lock-wrap">
     <div class="lock-card">
@@ -84,72 +268,141 @@ const TEMPLATE = `
         </el-form-item>
       </el-form>
       <div v-if="err" style="color:#f56c6c; font-size:13px; margin-top:14px;">{{ err }}</div>
-      <div v-if="!initialized" style="color:#8a93a6; font-size:12px; margin-top:16px; line-height:1.6;">
+      <div v-if="!initialized" style="color:var(--text-dim); font-size:12px; margin-top:16px; line-height:1.6;">
         ⚠️ 密码是唯一钥匙，忘记将无法找回（数据将永久不可读）。
       </div>
     </div>
   </div>
 
-  <div v-else>
-    <div class="app-header">
-      <div class="app-title">🔐 保险箱</div>
-      <el-radio-group v-model="viewMode" size="small">
-        <el-radio-button value="grid">宫格</el-radio-button>
-        <el-radio-button value="list">列表</el-radio-button>
-      </el-radio-group>
-      <div class="spacer"></div>
-      <el-button size="small" @click="refresh">刷新</el-button>
-      <el-button type="primary" size="small" @click="uploadVisible = true">上传</el-button>
-      <el-button size="small" @click="doLock">锁定</el-button>
+  <div v-else class="app-shell">
+    <!-- 侧边栏 -->
+    <div :class="['sidebar', sidebarOpen ? 'open' : '']">
+      <div class="sidebar-header">
+        <span>🔐 保险箱</span>
+      </div>
+      <div class="sidebar-body">
+        <div :class="['folder-item', currentFolderId === '' ? 'active' : '']" @click="navigateFolder('')">
+          <span class="icon">📂</span>
+          <span class="name">全部文件</span>
+        </div>
+        <div v-for="f in folders" :key="f.id" :class="['folder-item', currentFolderId === f.id ? 'active' : '']">
+          <span class="icon" @click.stop="navigateFolder(f.id)">📁</span>
+          <span class="name" @click="navigateFolder(f.id)">{{ f.name }}</span>
+          <button class="menu-btn" @click.stop="folderMenu(f, $event)">⋯</button>
+        </div>
+      </div>
+      <div class="sidebar-actions">
+        <el-button size="small" style="width:100%" @click="showNewFolder = true">+ 新建文件夹</el-button>
+      </div>
     </div>
+    <!-- 移动端遮罩 -->
+    <div :class="['sidebar-backdrop', sidebarOpen ? 'show' : '']" @click="sidebarOpen = false"></div>
 
-    <div class="app-body">
-      <div v-if="viewMode === 'grid'" class="grid">
-        <div v-for="f in files" :key="f.id" class="cell">
-          <el-image v-if="isImg(f)" class="thumb" :src="thumbUrl(f)"
-                    :preview-src-list="imgPreviewList" :initial-index="imgIndexOf(f.id)"
-                    preview-teleported fit="cover" lazy>
-            <template #error><div class="thumb">🖼️</div></template>
-          </el-image>
-          <div v-else class="thumb" @click="open(f)">{{ iconFor(f.mime) }}</div>
-          <div class="meta">
-            <div class="name" :title="f.name">{{ f.name }}</div>
-            <div class="size">{{ fmtSize(f.size) }}</div>
+    <!-- 主区 -->
+    <div class="main">
+      <div class="app-header">
+        <button class="menu-btn-header" @click="sidebarOpen = !sidebarOpen">☰</button>
+        <div class="breadcrumb">
+          <span class="crumb" @click="navigateFolder('')">根目录</span>
+          <template v-for="(crumb, idx) in breadcrumbItems" :key="idx">
+            <span class="crumb-sep">/</span>
+            <span :class="['crumb', idx === breadcrumbItems.length - 1 ? 'current' : '']" @click="navigateFolder(crumb.id)">{{ crumb.name }}</span>
+          </template>
+        </div>
+        <div class="header-actions">
+          <el-radio-group v-model="viewMode" size="small">
+            <el-radio-button value="grid">宫格</el-radio-button>
+            <el-radio-button value="list">列表</el-radio-button>
+          </el-radio-group>
+          <el-button size="small" @click="refresh">刷新</el-button>
+          <el-button type="primary" size="small" @click="uploadVisible = true">上传</el-button>
+          <el-button size="small" @click="doLock">锁定</el-button>
+        </div>
+      </div>
+
+      <div class="app-body">
+        <div v-if="viewMode === 'grid'" class="grid">
+          <div v-for="f in files" :key="f.id" class="cell">
+            <el-image v-if="isImg(f)" class="thumb" :src="thumbUrl(f)"
+                      :preview-src-list="imgPreviewList" :initial-index="imgIndexOf(f.id)"
+                      preview-teleported fit="cover" lazy>
+              <template #error><div class="thumb">🖼️</div></template>
+            </el-image>
+            <div v-else class="thumb" @click="open(f)">{{ iconFor(f.mime) }}</div>
+            <div class="meta">
+              <div class="name" :title="f.name">{{ f.name }}</div>
+              <div class="size">{{ fmtSize(f.size) }}</div>
+            </div>
+            <el-button class="move-btn" size="small" circle @click.stop="moveFileDialog(f)">↗</el-button>
+            <el-button class="del" size="small" circle type="danger" @click.stop="del(f)">✕</el-button>
           </div>
-          <el-button class="del" size="small" circle type="danger" @click.stop="del(f)">✕</el-button>
+        </div>
+        <div v-else>
+          <div v-for="f in files" :key="f.id" class="list-row" @click="open(f)">
+            <div class="icon">{{ iconFor(f.mime) }}</div>
+            <div class="lname">{{ f.name }}</div>
+            <div class="lsize">{{ fmtSize(f.size) }}</div>
+            <el-button size="small" text @click.stop="moveFileDialog(f)">移动</el-button>
+            <el-button size="small" type="danger" text @click.stop="del(f)">删除</el-button>
+          </div>
+        </div>
+        <div v-if="files.length === 0" class="empty">
+          <div class="big">📂</div>
+          <div style="margin-top:12px;">{{ currentFolderId ? '此文件夹为空' : '保险箱是空的，点击右上角「上传」添加文件' }}</div>
         </div>
       </div>
-      <div v-else>
-        <div v-for="f in files" :key="f.id" class="list-row" @click="open(f)">
-          <div class="icon">{{ iconFor(f.mime) }}</div>
-          <div class="lname">{{ f.name }}</div>
-          <div class="lsize">{{ fmtSize(f.size) }}</div>
-          <el-button size="small" type="danger" text @click.stop="del(f)">删除</el-button>
+
+      <el-dialog v-model="playerVisible" :title="playerName" class="player-dialog" width="760px" destroy-on-close>
+        <div class="video-wrap">
+          <video v-if="isVideo" :src="playerUrl" controls autoplay style="max-height:70vh;"></video>
+          <audio v-else :src="playerUrl" controls autoplay style="width:100%; padding:20px;"></audio>
         </div>
-      </div>
-      <div v-if="files.length === 0" class="empty">
-        <div class="big">📂</div>
-        <div style="margin-top:12px;">保险箱是空的，点击右上角「上传」添加文件</div>
-      </div>
+      </el-dialog>
+
+      <el-dialog v-model="uploadVisible" :title="'上传到 ' + (currentFolderName || '根目录')" width="480px">
+        <el-upload drag multiple :auto-upload="false" :limit="20" :on-change="onPick" :show-file-list="true">
+          <div style="font-size:44px;">📤</div>
+          <div style="margin-top:8px;">拖拽文件到此处，或点击选择</div>
+        </el-upload>
+        <div style="margin-top:14px; text-align:right;">
+          <el-button @click="uploadVisible=false">取消</el-button>
+          <el-button type="primary" :loading="uploading" @click="doUpload">开始上传</el-button>
+        </div>
+      </el-dialog>
+
+      <!-- 新建文件夹 -->
+      <el-dialog v-model="showNewFolder" title="新建文件夹" width="360px">
+        <el-input v-model="newFolderName" placeholder="文件夹名" @keyup.enter="createFolder" />
+        <div style="margin-top:14px; text-align:right;">
+          <el-button @click="showNewFolder=false">取消</el-button>
+          <el-button type="primary" @click="createFolder">创建</el-button>
+        </div>
+      </el-dialog>
+
+      <!-- 重命名文件夹 -->
+      <el-dialog v-model="renameVisible" title="重命名文件夹" width="360px">
+        <el-input v-model="renameValue" @keyup.enter="doRename" />
+        <div style="margin-top:14px; text-align:right;">
+          <el-button @click="renameVisible=false">取消</el-button>
+          <el-button type="primary" @click="doRename">确定</el-button>
+        </div>
+      </el-dialog>
+
+      <!-- 移动文件 -->
+      <el-dialog v-model="moveVisible" title="移动文件到..." width="360px">
+        <el-radio-group v-model="moveTarget" style="width:100%;">
+          <el-radio value="" style="display:flex; margin:6px 0;">📂 根目录</el-radio>
+          <el-radio v-for="f in folders" :key="f.id" :value="f.id" style="display:flex; margin:6px 0;">📁 {{ f.name }}</el-radio>
+        </el-radio-group>
+        <div style="margin-top:14px; text-align:right;">
+          <el-button @click="moveVisible=false">取消</el-button>
+          <el-button type="primary" @click="doMove">移动</el-button>
+        </div>
+      </el-dialog>
+
+      <!-- 文件夹右键菜单 -->
+      <ul v-show="false"></ul>
     </div>
-
-    <el-dialog v-model="playerVisible" :title="playerName" class="player-dialog" width="760px" destroy-on-close>
-      <div class="video-wrap">
-        <video v-if="isVideo" :src="playerUrl" controls autoplay style="max-height:70vh;"></video>
-        <audio v-else :src="playerUrl" controls autoplay style="width:100%; padding:20px;"></audio>
-      </div>
-    </el-dialog>
-
-    <el-dialog v-model="uploadVisible" title="上传文件" width="480px">
-      <el-upload drag multiple :auto-upload="false" :limit="20" :on-change="onPick" :show-file-list="true">
-        <div style="font-size:44px;">📤</div>
-        <div style="margin-top:8px;">拖拽文件到此处，或点击选择</div>
-      </el-upload>
-      <div style="margin-top:14px; text-align:right;">
-        <el-button @click="uploadVisible=false">取消</el-button>
-        <el-button type="primary" :loading="uploading" @click="doUpload">开始上传</el-button>
-      </div>
-    </el-dialog>
   </div>
 `;
 
@@ -162,15 +415,49 @@ const app = createApp({
     const password2 = ref('');
     const busy = ref(false);
     const err = ref('');
+
+    const folders = ref([]);
     const files = ref([]);
+    const currentFolderId = ref('');
     const viewMode = ref('grid');
+
     const uploadVisible = ref(false);
     const uploading = ref(false);
     const pickedFiles = ref([]);
+
     const playerVisible = ref(false);
     const playerName = ref('');
     const playerUrl = ref('');
     const isVideo = ref(false);
+
+    const showNewFolder = ref(false);
+    const newFolderName = ref('');
+    const renameVisible = ref(false);
+    const renameValue = ref('');
+    const renameTargetId = ref('');
+    const moveVisible = ref(false);
+    const moveTarget = ref('');
+    const moveTargetFileId = ref('');
+
+    const sidebarOpen = ref(false);
+
+    const breadcrumbItems = computed(() => {
+      const items = [];
+      let cur = currentFolderId.value;
+      while (cur) {
+        const f = folders.value.find(x => x.id === cur);
+        if (!f) break;
+        items.unshift({ id: f.id, name: f.name });
+        // 单层结构，没有父目录；遇到没有 parent 时停
+        break;
+      }
+      return items;
+    });
+
+    const currentFolderName = computed(() => {
+      const f = folders.value.find(x => x.id === currentFolderId.value);
+      return f ? f.name : '';
+    });
 
     const imgPreviewList = computed(() =>
       files.value.filter(x => x.mime.startsWith('image/')).map(x => '/api/file/' + x.id)
@@ -196,7 +483,7 @@ const app = createApp({
         const s = await fetch('/api/status', { credentials: 'include' }).then(r => r.json());
         initialized.value = s.initialized;
         try {
-          await api('/api/files');
+          await api('/api/folders');
           unlocked.value = true;
           await refresh();
         } catch (e) { unlocked.value = false; }
@@ -232,7 +519,8 @@ const app = createApp({
       try { await api('/api/lock', { method: 'POST' }); } catch (e) {}
       unlocked.value = false;
       files.value = [];
-      // 刷新 initialized 状态，确保锁屏显示"解锁"而非"创建"
+      folders.value = [];
+      currentFolderId.value = '';
       try {
         const s = await fetch('/api/status', { credentials: 'include' }).then(r => r.json());
         initialized.value = s.initialized;
@@ -241,9 +529,90 @@ const app = createApp({
 
     async function refresh() {
       try {
-        const r = await api('/api/files');
-        files.value = r.files;
+        const [fr, fl] = await Promise.all([
+          api('/api/folders'),
+          api('/api/files?folder_id=' + encodeURIComponent(currentFolderId.value)),
+        ]);
+        folders.value = fr.folders || [];
+        files.value = fl.files || [];
       } catch (e) { if (e.message === '未解锁') unlocked.value = false; }
+    }
+
+    function navigateFolder(id) {
+      currentFolderId.value = id || '';
+      sidebarOpen.value = false;
+      refresh();
+    }
+
+    async function createFolder() {
+      const name = newFolderName.value.trim();
+      if (!name) { ElMessage.warning('请输入文件夹名'); return; }
+      try {
+        await api('/api/folders', { method: 'POST', body: JSON.stringify({ name }) });
+        newFolderName.value = '';
+        showNewFolder.value = false;
+        ElMessage.success('已创建');
+        await refresh();
+      } catch (e) { ElMessage.error(e.message); }
+    }
+
+    async function folderMenu(f, ev) {
+      try {
+        const choice = await ElMessageBox({
+          title: f.name,
+          message: '选择操作',
+          showCancelButton: true,
+          confirmButtonText: '重命名',
+          cancelButtonText: '删除',
+          distinguishCancelAndClose: true,
+        }).catch(e => e);
+        if (choice === 'confirm') {
+          renameTargetId.value = f.id;
+          renameValue.value = f.name;
+          renameVisible.value = true;
+        } else if (choice === 'cancel') {
+          try {
+            await ElMessageBox.confirm(`删除文件夹「${f.name}」？里面的文件会被移到根目录。`, '删除', { type: 'warning' });
+          } catch (e) { return; }
+          try {
+            await api('/api/folders/' + f.id, { method: 'DELETE' });
+            ElMessage.success('已删除');
+            if (currentFolderId.value === f.id) navigateFolder('');
+            else await refresh();
+          } catch (e) { ElMessage.error(e.message); }
+        }
+      } catch (e) {}
+    }
+
+    async function doRename() {
+      const name = renameValue.value.trim();
+      if (!name) return;
+      try {
+        await api('/api/folders/' + renameTargetId.value, {
+          method: 'PATCH',
+          body: JSON.stringify({ name }),
+        });
+        renameVisible.value = false;
+        await refresh();
+      } catch (e) { ElMessage.error(e.message); }
+    }
+
+    function moveFileDialog(f) {
+      moveTargetFileId.value = f.id;
+      moveTarget.value = currentFolderId.value;
+      moveVisible.value = true;
+    }
+
+    async function doMove() {
+      try {
+        await api('/api/file/' + moveTargetFileId.value + '/move', {
+          method: 'PATCH',
+          body: JSON.stringify({ folder_id: moveTarget.value }),
+        });
+        moveVisible.value = false;
+        ElMessage.success('已移动');
+        await refresh();
+      } catch (e) { ElMessage.error(e.message); }
     }
 
     function onPick(file) { pickedFiles.value.push(file.raw); }
@@ -256,7 +625,8 @@ const app = createApp({
         try {
           const fd = new FormData();
           fd.append('file', f);
-          const res = await fetch('/api/upload', { method: 'POST', body: fd, credentials: 'include' });
+          const url = '/api/upload?folder_id=' + encodeURIComponent(currentFolderId.value);
+          const res = await fetch(url, { method: 'POST', body: fd, credentials: 'include' });
           if (res.ok) ok++; else fail++;
         } catch (e) { fail++; }
       }
@@ -277,7 +647,7 @@ const app = createApp({
 
     function iconFor(mime) {
       if (mime.startsWith('video/')) return '🎬';
-      if (mime.startsWith('audio/')) return '🎵';
+      if (mime.startsWith('audio/')) return '�';
       if (mime.startsWith('image/')) return '🖼️';
       if (mime.includes('pdf')) return '📄';
       if (mime.includes('zip') || mime.includes('rar') || mime.includes('7z')) return '📦';
@@ -318,9 +688,15 @@ const app = createApp({
 
     return {
       initialized, unlocked, password, password2, busy, err,
-      files, viewMode, uploadVisible, uploading, pickedFiles,
-      playerVisible, playerName, playerUrl, isVideo, imgPreviewList,
-      doInit, doUnlock, doLock, refresh, onPick, doUpload,
+      folders, files, currentFolderId, currentFolderName, breadcrumbItems,
+      viewMode, uploadVisible, uploading, pickedFiles,
+      playerVisible, playerName, playerUrl, isVideo,
+      showNewFolder, newFolderName,
+      renameVisible, renameValue,
+      moveVisible, moveTarget,
+      sidebarOpen, imgPreviewList,
+      doInit, doUnlock, doLock, refresh, navigateFolder, createFolder,
+      folderMenu, doRename, moveFileDialog, doMove, onPick, doUpload,
       isImg, thumbUrl, imgIndexOf, iconFor, open, del, fmtSize,
     };
   },

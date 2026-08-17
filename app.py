@@ -119,16 +119,60 @@ async def lock(vault_token: str | None = Cookie(default=None), response: Respons
 
 
 @app.get("/api/files")
-async def list_files(key: bytes = Depends(_get_key)):
-    files = vault.list_files(key)
+async def list_files(folder_id: str = "", key: bytes = Depends(_get_key)):
+    files = vault.list_files(key, folder_id)
     return {"files": files}
 
 
+@app.get("/api/folders")
+async def list_folders(key: bytes = Depends(_get_key)):
+    return {"folders": vault.list_folders(key)}
+
+
+@app.post("/api/folders")
+async def create_folder(body: dict, key: bytes = Depends(_get_key)):
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="文件夹名不能为空")
+    if len(name) > 64:
+        raise HTTPException(status_code=400, detail="文件夹名过长")
+    folder_id = vault.create_folder(key, name)
+    return {"id": folder_id, "name": name}
+
+
+@app.patch("/api/folders/{folder_id}")
+async def rename_folder(folder_id: str, body: dict, key: bytes = Depends(_get_key)):
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="文件夹名不能为空")
+    if not vault.rename_folder(key, folder_id, name):
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+    return {"ok": True}
+
+
+@app.delete("/api/folders/{folder_id}")
+async def delete_folder(folder_id: str, key: bytes = Depends(_get_key)):
+    if not vault.delete_folder_for_user(key, folder_id):
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+    return {"ok": True}
+
+
+@app.patch("/api/file/{file_id}/move")
+async def move_file(file_id: str, body: dict, key: bytes = Depends(_get_key)):
+    folder_id = body.get("folder_id") or ""
+    if not vault.move_file(key, file_id, folder_id):
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return {"ok": True}
+
+
 @app.post("/api/upload")
-async def upload(file: UploadFile = File(...), key: bytes = Depends(_get_key)):
+async def upload(
+    file: UploadFile = File(...),
+    folder_id: str = "",
+    key: bytes = Depends(_get_key),
+):
     if not file.filename:
         raise HTTPException(status_code=400, detail="缺少文件名")
-    # 先写入临时文件（避免大文件占内存）
     tmp_dir = os.path.join(DATA_DIR, "tmp")
     os.makedirs(tmp_dir, exist_ok=True)
     tmp_path = os.path.join(tmp_dir, uuid.uuid4().hex)
@@ -145,11 +189,9 @@ async def upload(file: UploadFile = File(...), key: bytes = Depends(_get_key)):
                     raise HTTPException(status_code=413, detail=f"文件超过 {MAX_UPLOAD_MB}MB 上限")
                 f.write(chunk)
         mime = file.content_type or ""
-        # 泛型/缺失的 content-type 用文件名后缀补正（curl 等客户端常传 octet-stream）
         if not mime or mime in ("application/octet-stream", "text/plain"):
             mime = _guess_mime(file.filename)
-        file_id = vault.add_file(key, tmp_path, file.filename, mime)
-        # 图片立即生成缩略图（失败不阻断上传）
+        file_id = vault.add_file(key, tmp_path, file.filename, mime, folder_id)
         if mime and mime.startswith("image/"):
             try:
                 _make_thumbnail(key, file_id)

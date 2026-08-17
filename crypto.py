@@ -254,6 +254,14 @@ class Vault:
                     size INTEGER NOT NULL,
                     cipher_size INTEGER NOT NULL,
                     thumb INTEGER NOT NULL DEFAULT 0,
+                    folder_id_enc TEXT NOT NULL DEFAULT '',
+                    created INTEGER NOT NULL
+                )"""
+            )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS folders (
+                    id TEXT PRIMARY KEY,
+                    name_enc TEXT NOT NULL,
                     created INTEGER NOT NULL
                 )"""
             )
@@ -290,30 +298,42 @@ class Vault:
         return None
 
     # -- 文件操作（需已解锁，传入 master_key）-----------------------------
-    def add_file(self, master_key: bytes, src_path: str, display_name: str, mime: str) -> str:
+    def add_file(self, master_key: bytes, src_path: str, display_name: str, mime: str, folder_id: str = "") -> str:
         file_id = uuid.uuid4().hex
         dst_path = os.path.join(self.files_dir, file_id + ".enc")
         plain_size, cipher_size = encrypt_file(master_key, file_id, src_path, dst_path)
 
         with self._conn() as c:
             c.execute(
-                "INSERT INTO files(id,name_enc,mime_enc,size,cipher_size,thumb,created) VALUES(?,?,?,?,?,0,?)",
+                "INSERT INTO files(id,name_enc,mime_enc,size,cipher_size,thumb,folder_id_enc,created) VALUES(?,?,?,?,?,0,?,?)",
                 (
                     file_id,
                     encrypt_name(master_key, file_id, display_name),
                     encrypt_name(master_key, file_id, mime or "application/octet-stream"),
                     plain_size,
                     cipher_size,
+                    encrypt_name(master_key, file_id, folder_id or ""),
                     int(time.time()),
                 ),
             )
         return file_id
 
-    def list_files(self, master_key: bytes) -> list[dict]:
+    def move_file(self, master_key: bytes, file_id: str, folder_id: str) -> bool:
+        with self._conn() as c:
+            cur = c.execute(
+                "UPDATE files SET folder_id_enc=? WHERE id=?",
+                (encrypt_name(master_key, file_id, folder_id or ""), file_id),
+            )
+            return cur.rowcount > 0
+
+    def list_files(self, master_key: bytes, folder_id: str = "") -> list[dict]:
         with self._conn() as c:
             rows = c.execute("SELECT * FROM files ORDER BY created DESC").fetchall()
         out = []
         for r in rows:
+            f_folder = decrypt_name(master_key, r["id"], r["folder_id_enc"]) if r["folder_id_enc"] else ""
+            if f_folder != (folder_id or ""):
+                continue
             out.append({
                 "id": r["id"],
                 "name": decrypt_name(master_key, r["id"], r["name_enc"]),
@@ -321,8 +341,61 @@ class Vault:
                 "size": r["size"],
                 "created": r["created"],
                 "has_thumb": bool(r["thumb"]),
+                "folder_id": f_folder,
             })
         return out
+
+    # -- 文件夹操作 -----------------------------------------------------
+    def create_folder(self, master_key: bytes, name: str) -> str:
+        folder_id = uuid.uuid4().hex
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO folders(id,name_enc,created) VALUES(?,?,?)",
+                (folder_id, encrypt_name(master_key, folder_id, name), int(time.time())),
+            )
+        return folder_id
+
+    def list_folders(self, master_key: bytes) -> list[dict]:
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM folders ORDER BY created ASC").fetchall()
+        return [
+            {"id": r["id"], "name": decrypt_name(master_key, r["id"], r["name_enc"]), "created": r["created"]}
+            for r in rows
+        ]
+
+    def rename_folder(self, master_key: bytes, folder_id: str, new_name: str) -> bool:
+        with self._conn() as c:
+            cur = c.execute(
+                "UPDATE folders SET name_enc=? WHERE id=?",
+                (encrypt_name(master_key, folder_id, new_name), folder_id),
+            )
+            return cur.rowcount > 0
+
+    def delete_folder(self, folder_id: str) -> bool:
+        """删除文件夹：内部文件移到根目录后删除文件夹。"""
+        with self._conn() as c:
+            # 文件的 folder_id_enc 仍指向本目录——直接置空（不重新加密，原值仍可解）
+            c.execute("UPDATE files SET folder_id_enc='' WHERE folder_id_enc IS NOT NULL")  # 占位
+        # 实际上需要 master_key 才能正确处理；调用方 delete_folder_for_user 提供
+        raise NotImplementedError("请调用 delete_folder_for_user")
+
+    def delete_folder_for_user(self, master_key: bytes, folder_id: str) -> bool:
+        """删除文件夹：先把里面所有文件的 folder 字段清空（重新加密），再删除文件夹记录。"""
+        with self._conn() as c:
+            # 找出文件夹下所有文件
+            files = c.execute("SELECT id, folder_id_enc FROM files").fetchall()
+            for r in files:
+                try:
+                    current = decrypt_name(master_key, r["id"], r["folder_id_enc"]) if r["folder_id_enc"] else ""
+                except Exception:
+                    continue
+                if current == folder_id:
+                    c.execute(
+                        "UPDATE files SET folder_id_enc=? WHERE id=?",
+                        (encrypt_name(master_key, r["id"], ""), r["id"]),
+                    )
+            cur = c.execute("DELETE FROM folders WHERE id=?", (folder_id,))
+            return cur.rowcount > 0
 
     def get_record(self, file_id: str) -> dict | None:
         with self._conn() as c:
