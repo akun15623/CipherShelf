@@ -44,8 +44,9 @@ def main() -> int:
         if password != confirm:
             print("✗ 两次密码不一致", file=sys.stderr)
             return 2
-    if len(password) < 12:
-        print("✗ 密码至少 12 位", file=sys.stderr)
+    message = crypto.password_strength_error(password)
+    if message:
+        print(f"✗ {message}", file=sys.stderr)
         return 2
 
     key = crypto.KeyContext(crypto.derive_master_key(password))

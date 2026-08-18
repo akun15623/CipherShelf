@@ -25,7 +25,6 @@ VAULT_UNCONFIGURED = os.environ.get("VAULT_UNCONFIGURED") == "1"
 COOKIE_SECURE = os.environ.get("SVAULT_COOKIE_SECURE", "0") == "1"
 
 COOKIE_NAME = "svault_token"
-MIN_PASSWORD_LEN = 12
 SESSION_IDLE_SECONDS = 30 * 60
 SESSION_MAX_SECONDS = 8 * 60 * 60
 MAX_TASKS = 100
@@ -120,9 +119,7 @@ def _get_session(token: str = Depends(_get_request_token)) -> dict:
 
 
 def _check_password_strength(password: str) -> str | None:
-    if len(password) < MIN_PASSWORD_LEN:
-        return f"密码至少 {MIN_PASSWORD_LEN} 位"
-    return None
+    return crypto.password_strength_error(password)
 
 
 def _is_link_or_junction(path: str) -> bool:

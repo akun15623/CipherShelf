@@ -58,6 +58,27 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _WINDOWS_RESERVED = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$", re.IGNORECASE)
 _RESERVED_PREFIXES = (".svault-stage-", ".svault-backup-", ".svault-txn-")
 
+MIN_PASSWORD_LEN = 12
+
+
+def password_strength_error(password: str) -> str | None:
+    """返回密码强度不达标的提示；达标返回 None。
+
+    要求：至少 12 位，且同时包含大写字母、小写字母、数字、符号。
+    符号定义为非字母非数字的字符（如 !@#$% 等标点）。
+    """
+    if len(password) < MIN_PASSWORD_LEN:
+        return f"密码至少 {MIN_PASSWORD_LEN} 位"
+    if not re.search(r"[A-Z]", password):
+        return "密码需包含大写字母"
+    if not re.search(r"[a-z]", password):
+        return "密码需包含小写字母"
+    if not re.search(r"[0-9]", password):
+        return "密码需包含数字"
+    if not re.search(r"[^A-Za-z0-9]", password):
+        return "密码需包含符号（如 !@#$%）"
+    return None
+
 
 def derive_master_key(password: str, salt: bytes = DEFAULT_SALT, iterations: int = ITERATIONS) -> bytes:
     """Derive the legacy-compatible password-root key.

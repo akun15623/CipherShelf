@@ -1,6 +1,6 @@
 services:
   ciphershelf:
-    image: crpi-dberwpbq5bud3kxp.cn-chengdu.personal.cr.aliyuncs.com/akun15623/ciphershelf:1.1.2
+    image: crpi-dberwpbq5bud3kxp.cn-chengdu.personal.cr.aliyuncs.com/akun15623/ciphershelf:1.1.3
     container_name: ciphershelf
     restart: unless-stopped
     ports:

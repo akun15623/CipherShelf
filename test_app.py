@@ -13,7 +13,7 @@ import app
 
 
 HEADERS = {"X-SVault-Request": "1"}
-PASSWORD = "integration-password-123"
+PASSWORD = "Integration-Password-123!"
 
 
 class AppTests(unittest.TestCase):

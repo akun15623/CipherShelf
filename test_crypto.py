@@ -70,6 +70,17 @@ def write_v1_index(path, entries):
 
 
 class CryptoTests(unittest.TestCase):
+    def test_password_strength_requires_length_and_four_character_classes(self):
+        for weak in (
+            "Ab1!",                # 太短
+            "abcdef123456",        # 无大写、无符号
+            "ABCDEF123456",        # 无小写、无符号
+            "Abcdefghijk!",        # 无数字
+            "Abcdefgh12345",       # 无符号
+        ):
+            self.assertIsNotNone(crypto.password_strength_error(weak), weak)
+        self.assertIsNone(crypto.password_strength_error("Abcdef123!@#"))
+
     def test_kdf_vector_and_parameters_are_frozen(self):
         key = crypto.derive_master_key("secure-vault-test-password")
         self.assertEqual(key.hex(), "737d703b7454ea13eb5f9de1972bf9e6d154001e0415c1a04526a8490adeab06")
