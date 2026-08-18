@@ -26,6 +26,8 @@ VAULT_ROOT = os.environ.get("VAULT_ROOT", "/data")
 PORT = int(os.environ.get("PORT", "8080"))
 # 可选：环境变量预设初始密码。设了则解锁时直接比对（不再走「创建密码」流程）。
 PRESET_PASSWORD = os.environ.get("VAULT_PASSWORD") or None
+# 未配置授权目录时为 True（应用用占位目录启动，前端引导用户去配置）
+VAULT_UNCONFIGURED = os.environ.get("VAULT_UNCONFIGURED") == "1"
 
 app = FastAPI(title="Secure Vault", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -92,11 +94,14 @@ async def status():
     return {
         "initialized": crypto.is_initialized(VAULT_ROOT),
         "preset": PRESET_PASSWORD is not None,
+        "configured": not VAULT_UNCONFIGURED,
     }
 
 
 @app.post("/api/unlock")
 async def unlock(body: dict, response: Response):
+    if VAULT_UNCONFIGURED:
+        raise HTTPException(status_code=400, detail="请先在应用设置里配置数据目录")
     password = body.get("password", "")
     if not password:
         raise HTTPException(status_code=400, detail="密码不能为空")

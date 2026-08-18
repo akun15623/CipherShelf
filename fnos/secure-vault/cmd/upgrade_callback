@@ -1,0 +1,30 @@
+#!/bin/bash
+
+# 升级回调：用新版本 requirements 重装依赖（离线优先，在线回退）
+
+export PATH=/var/apps/python312/target/bin:$PATH
+
+APP_DIR="${TRIM_APPDEST}/server"
+PKGVAR="${TRIM_PKGVAR}"
+VENV="${PKGVAR}/venv"
+LOG="${PKGVAR}/install.log"
+WHEELS="$APP_DIR/wheels"
+
+mkdir -p "$PKGVAR"
+
+if [ ! -x "$VENV/bin/python" ]; then
+    python3 -m venv "$VENV" >> "$LOG" 2>&1
+fi
+[ -x "$VENV/bin/python" ] || exit 1
+
+PIP="$VENV/bin/python -m pip"
+
+if [ -d "$WHEELS" ] && [ -n "$(ls -A "$WHEELS" 2>/dev/null)" ]; then
+    $PIP install --no-index --find-links "$WHEELS" -r "$APP_DIR/requirements.txt" >> "$LOG" 2>&1 && exit 0
+fi
+
+$PIP install --no-cache-dir \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    -r "$APP_DIR/requirements.txt" >> "$LOG" 2>&1
+
+exit 0

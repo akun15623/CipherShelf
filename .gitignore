@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 .env
+
+# 飞牛 Native 打包：app/server/ 由 fnos/build.sh 从根目录生成，.fpk 为构建产物
+fnos/secure-vault/app/server/
+*.fpk

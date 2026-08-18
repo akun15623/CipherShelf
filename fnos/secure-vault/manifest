@@ -1,0 +1,16 @@
+appname               = secure-vault
+version               = 1.0.0
+display_name          = 文件夹加解密
+desc                  = 本地文件夹就地加解密工具：一个密码加密整个目录，目录名/文件名变密文、结构保留，解密凭密码还原。
+platform              = x86
+source                = thirdparty
+maintainer            = akun533
+maintainer_url        = http://192.168.10.4:3000/akun533
+distributor           = akun533
+desktop_uidir         = ui
+desktop_applaunchname = secure-vault.main
+install_dep_apps      = python312
+disable_authorization_path = false
+service_port          = 8090
+ctl_stop              = true
+checkport             = true

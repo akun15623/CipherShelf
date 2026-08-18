@@ -110,32 +110,47 @@ const { ElMessage } = ElementPlus;
 const TEMPLATE = `
   <div v-if="!unlocked" class="lock-wrap">
     <div class="lock-card">
-      <div class="lock-icon">🔐</div>
-      <div class="lock-title">{{ needCreate ? '创建密码' : '文件夹加解密' }}</div>
-      <div class="lock-sub">{{ needCreate ? '首次使用：设置一个密码作为加解密密钥' : '输入密码进入（密码即加解密密钥）' }}</div>
-
-      <template v-if="needCreate">
-        <el-input v-model="password" type="password" show-password size="large" class="lock-input"
-                  placeholder="设置密码（至少 8 位）" @keyup.enter="doUnlock" />
-        <el-input v-model="confirmPassword" type="password" show-password size="large" class="lock-input"
-                  style="margin-top:12px;" placeholder="再次确认密码" @keyup.enter="doUnlock" />
-        <el-button type="primary" size="large" style="width:100%;margin-top:18px;height:48px;"
-                   :loading="busy" @click="doUnlock">创建并进入</el-button>
+      <template v-if="configured === false">
+        <div class="lock-icon">📁</div>
+        <div class="lock-title">尚未配置数据目录</div>
+        <div class="lock-sub">请先点选要加密的数据文件夹</div>
+        <div style="color:var(--text);font-size:13px;line-height:2;text-align:left;background:var(--card-hover);border-radius:10px;padding:14px 16px;margin-top:8px;">
+          ① 打开飞牛「应用中心」<br>
+          ② 找到「文件夹加解密」→ 点「设置」<br>
+          ③ 在「授权目录」里点选数据文件夹<br>
+          ④ 保存后重新启动本应用
+        </div>
+        <div style="color:var(--text-dim);font-size:12px;margin-top:14px;">配置完成后重启应用即可进入</div>
       </template>
 
-      <template v-else-if="showSingleInput">
-        <el-input v-model="password" type="password" show-password size="large" class="lock-input"
-                  placeholder="密码" @keyup.enter="doUnlock" />
-        <el-button type="primary" size="large" style="width:100%;margin-top:18px;height:48px;"
-                   :loading="busy" @click="doUnlock">进入</el-button>
+      <template v-else>
+        <div class="lock-icon">🔐</div>
+        <div class="lock-title">{{ needCreate ? '创建密码' : '文件夹加解密' }}</div>
+        <div class="lock-sub">{{ needCreate ? '首次使用：设置一个密码作为加解密密钥' : '输入密码进入（密码即加解密密钥）' }}</div>
+
+        <template v-if="needCreate">
+          <el-input v-model="password" type="password" show-password size="large" class="lock-input"
+                    placeholder="设置密码（至少 8 位）" @keyup.enter="doUnlock" />
+          <el-input v-model="confirmPassword" type="password" show-password size="large" class="lock-input"
+                    style="margin-top:12px;" placeholder="再次确认密码" @keyup.enter="doUnlock" />
+          <el-button type="primary" size="large" style="width:100%;margin-top:18px;height:48px;"
+                     :loading="busy" @click="doUnlock">创建并进入</el-button>
+        </template>
+
+        <template v-else-if="showSingleInput">
+          <el-input v-model="password" type="password" show-password size="large" class="lock-input"
+                    placeholder="密码" @keyup.enter="doUnlock" />
+          <el-button type="primary" size="large" style="width:100%;margin-top:18px;height:48px;"
+                     :loading="busy" @click="doUnlock">进入</el-button>
+        </template>
+
+        <div v-else style="color:var(--text-dim);padding:16px 0;">加载中…</div>
+
+        <div v-if="err" style="color:var(--danger);font-size:13px;margin-top:12px;">{{ err }}</div>
+        <div style="color:var(--text-dim);font-size:12px;margin-top:16px;line-height:1.6;">
+          ⚠️ 密码是唯一密钥，忘记将无法解密已加密的文件。
+        </div>
       </template>
-
-      <div v-else style="color:var(--text-dim);padding:16px 0;">加载中…</div>
-
-      <div v-if="err" style="color:var(--danger);font-size:13px;margin-top:12px;">{{ err }}</div>
-      <div style="color:var(--text-dim);font-size:12px;margin-top:16px;line-height:1.6;">
-        ⚠️ 密码是唯一密钥，忘记将无法解密已加密的文件。
-      </div>
     </div>
   </div>
 
@@ -198,6 +213,7 @@ const app = createApp({
     const unlocked = ref(false);
     const initialized = ref(null);  // null=加载中, true=已初始化(输密码), false=首次(创建密码)
     const preset = ref(false);      // 环境变量是否预设了密码（预设则直接单密码框）
+    const configured = ref(null);   // null=加载中, true=已配置数据目录, false=未配置(引导去设置)
     const password = ref('');
     const confirmPassword = ref('');
     const busy = ref(false);
@@ -269,9 +285,14 @@ const app = createApp({
 
     function refreshStatus() {
       initialized.value = null;
+      configured.value = null;
       fetch('/api/status').then(s => s.json())
-        .then(d => { initialized.value = !!d.initialized; preset.value = !!d.preset; })
-        .catch(() => { initialized.value = true; });
+        .then(d => {
+          initialized.value = !!d.initialized;
+          preset.value = !!d.preset;
+          configured.value = d.configured !== false;  // 缺省视为已配置
+        })
+        .catch(() => { initialized.value = true; configured.value = true; });
     }
 
     function addPath(n, parentPath) {
@@ -364,7 +385,7 @@ const app = createApp({
     });
 
     return {
-      unlocked, initialized, preset, needCreate, showSingleInput, password, confirmPassword, busy, err,
+      unlocked, initialized, preset, configured, needCreate, showSingleInput, password, confirmPassword, busy, err,
       treeRef, treeData, treeProps, treeEmpty,
       progress, encryptSel, decryptSel,
       doUnlock, doLock, loadNode, onCheck, doEncrypt, doDecrypt, fmtSize,
