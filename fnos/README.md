@@ -1,54 +1,51 @@
-# 飞牛 fnOS Native 应用打包
+# 飞牛 fnOS 应用打包
 
-本目录将仓库根目录的 secure-vault 源码打包成飞牛 fnOS **Native** 应用（`.fpk`），支持在应用设置里**点选飞牛文件系统目录**作为数据目录。
+本目录把仓库根目录的 secure-vault 源码打包成飞牛 fnOS 应用（`.fpk`），提供两种形态：
+
+| 形态 | 目录 | 数据目录选择 | 依赖 | 适用场景 |
+|------|------|------------|------|---------|
+| **Native** | [`native/`](./native/) | 应用设置里**点选飞牛目录**（授权目录）| 预打包 wheel 离线装 | 想用飞牛原生目录选择器 |
+| **Docker** | [`docker/`](./docker/) | 安装向导手填绝对路径 | 镜像内置 | 稳定可靠、零联网、兼容旧习惯 |
+
+两种形态共用同一份源码（仓库根目录的 `crypto.py` / `app.py` / `static/`），构建脚本各自从根目录复制代码，**不会产生代码分叉**。
 
 ## 目录结构
 
 ```
 fnos/
-├── build.sh                 # 构建脚本：从根目录拷源码 → fnpack build
-├── wheels/                  # 预打包 Python 依赖（cp312 + manylinux x86_64，离线安装）
-├── README.md
-└── secure-vault/            # fnpack 包骨架（appname=secure-vault）
-    ├── manifest             # install_dep_apps=python312 + 授权目录开启
-    ├── cmd/                 # 生命周期脚本（main / install_callback / ...）
-    ├── config/              # privilege + resource
-    ├── wizard/config        # 应用设置：加解密密码
-    ├── ICON.PNG / ICON_256.PNG
-    └── app/ui/              # 桌面入口（iframe）+ 图标
+├── gen_icons.py              # 图标生成脚本（两个形态共用，改配色可重跑）
+├── README.md                 # 本文件
+├── native/                   # Native 形态（点选授权目录）
+│   ├── build.sh              #   拷源码 → fnpack build
+│   ├── wheels/               #   预打包 cp312 依赖
+│   ├── README.md
+│   └── secure-vault/         #   fnpack 包骨架（app/server/ 由 build.sh 生成）
+└── docker/                   # Docker 形态（本地镜像）
+    ├── build.sh              #   docker build → docker save → fnpack build
+    ├── README.md
+    └── secure-vault/         #   fnpack 包骨架（compose 用本地镜像）
 ```
-
-`secure-vault/app/server/`（后端代码 + wheels）**不进 git**，由 `build.sh` 从仓库根目录自动生成，保证源码只有一份、永不漂移。
 
 ## 构建
 
 ```bash
-./fnos/build.sh
+# Native 形态
+./fnos/native/build.sh
+
+# Docker 形态
+./fnos/docker/build.sh
 ```
 
-产物：`fnos/secure-vault/secure-vault.fpk`
+产物分别在各自的 `secure-vault/secure-vault.fpk`。
 
-前置要求：安装 [fnpack](https://developer.fnnas.com/docs/cli/fnpack)。
+## 重新生成图标
 
-## 安装与使用
+```bash
+python3 fnos/gen_icons.py fnos/native/secure-vault
+python3 fnos/gen_icons.py fnos/docker/secure-vault
+```
 
-1. 飞牛 **应用中心 → 手动安装 → 选 `secure-vault.fpk`**
-2. 等待安装（离线装依赖，依赖 wheel 已预打包）
-3. 进入**应用设置**，完成两项配置：
-   - **授权目录**：点选要加密的数据文件夹（飞牛原生目录选择器）
-   - **加解密密码**：设置 ≥ 8 位密码
-4. 应用中心**启动** → 桌面「文件夹加解密」图标 → 输入密码进入
+## 形态选择建议
 
-> 未配置授权目录时应用仍能启动（占位目录），打开后会看到引导页，按提示去设置点选目录并重启。
-
-## 关键机制
-
-| 项 | 说明 |
-|----|------|
-| 数据目录 | 应用设置「授权目录」点选 → `TRIM_DATA_ACCESSIBLE_PATHS`（取第一个）|
-| 密码 | 应用设置配置 → `wizard_password` → 环境变量 `VAULT_PASSWORD` |
-| 运行时 | `install_dep_apps=python312`，venv 在 `${TRIM_PKGVAR}/venv` |
-| 依赖 | 包内 wheels 离线安装，失败回退清华源 |
-| 端口 | 8090（可在应用设置改，`TRIM_SERVICE_PORT` 跟随）|
-
-⚠️ 密码即密钥，忘记无法找回；改密码前需先解密还原已加密目录。
+- **想要「点选目录」体验** → Native 版（见 [native/README.md](./native/README.md)，授权目录机制有若干真机验证点）
+- **想要零联网、稳定可靠** → Docker 版（见 [docker/README.md](./docker/README.md)，需先在飞牛设备 `docker load` 镜像）

@@ -1,0 +1,14 @@
+services:
+  secure-vault:
+    image: secure-vault:latest
+    pull_policy: never
+    container_name: secure-vault
+    restart: unless-stopped
+    ports:
+      - "${TRIM_SERVICE_PORT}:8080"
+    environment:
+      VAULT_ROOT: /data
+      PORT: "8080"
+      VAULT_PASSWORD: "${wizard_password}"
+    volumes:
+      - "${wizard_data_path}:/data"

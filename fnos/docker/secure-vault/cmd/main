@@ -1,0 +1,22 @@
+#!/bin/bash
+
+CONTAINER_NAME="secure-vault"
+
+case "$1" in
+start)
+    # Docker 应用由飞牛 appcenter 根据 docker-project 资源启动，此处无需操作
+    exit 0
+    ;;
+stop)
+    exit 0
+    ;;
+status)
+    if docker inspect "$CONTAINER_NAME" 2>/dev/null | grep -q '"Running": true'; then
+        exit 0
+    fi
+    exit 3
+    ;;
+*)
+    exit 1
+    ;;
+esac
