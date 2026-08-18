@@ -31,9 +31,10 @@ TAG_SIZE = 16            # GCM tag
 BLOCK_SIZE = 1024 * 1024  # 1 MiB 分块
 ITERATIONS = 600_000      # PBKDF2 迭代次数
 
-# 固定盐（代码内置常量，16 字节）：保证「同一密码 = 同一密钥」。
+# 固定盐（代码内置常量，恰好 16 字节）：保证「同一密码 = 同一密钥」。
 # 注意：这是「都用一个密钥」心智的直接代价——任何用同一密码的人都能互相解密。
-DEFAULT_SALT = b"secure-vault-v2."
+# v1 冻结常量，改动会破坏所有已加密数据；跨语言实现见 DESIGN.md §3.3 测试向量。
+DEFAULT_SALT = b"SVLT-PBKDF2-v1!!"
 
 # 密文文件头：magic(4) + version(1) + chunk_size(4) + block_count(4) = 13 字节
 HEADER_SIZE = 4 + 1 + 4 + 4
@@ -156,6 +157,35 @@ def read_index(master_key: bytes, path: str) -> list[dict]:
         raise ValueError("密码错误或索引已损坏")
     obj = json.loads(data.decode("utf-8"))
     return obj.get("entries", [])
+
+
+# ---------------------------------------------------------------------------
+# 初始化状态：发现工作区内的加密根
+# ---------------------------------------------------------------------------
+def find_encrypted_roots(root_dir: str) -> list[str]:
+    """返回 root_dir 下所有加密根（含 .svault 的目录）的索引文件路径列表。
+
+    遇到含 .svault 的目录即停止深入其子目录（其下全是密文，不会有 .svault），
+    并跳过符号链接目录（不跟随）。
+    """
+    root_dir = os.path.abspath(root_dir)
+    index_paths: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root_dir, followlinks=False):
+        if INDEX_FILENAME in filenames:
+            index_paths.append(os.path.join(dirpath, INDEX_FILENAME))
+            dirnames[:] = []
+            continue
+        dirnames[:] = [
+            d for d in dirnames
+            if not os.path.islink(os.path.join(dirpath, d))
+        ]
+    index_paths.sort()
+    return index_paths
+
+
+def is_initialized(root_dir: str) -> bool:
+    """VAULT_ROOT 下是否已存在至少一个加密索引（即密码已正式建立）。"""
+    return bool(find_encrypted_roots(root_dir))
 
 
 # ---------------------------------------------------------------------------

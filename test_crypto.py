@@ -201,8 +201,33 @@ def test_same_password_same_key():
     print("✓ 单密钥：同密码同密钥，不同密码不同密钥")
 
 
+def test_kdf_vector():
+    # DESIGN.md §3.3 冻结的公开测试向量：salt/iterations 被误改立即失败
+    k = derive_master_key("secure-vault-test-password")
+    assert k.hex() == "737d703b7454ea13eb5f9de1972bf9e6d154001e0415c1a04526a8490adeab06", \
+        f"KDF 测试向量不匹配：{k.hex()}"
+    print("✓ KDF 固定测试向量（salt/iterations 冻结）")
+
+
+def test_initialized():
+    tmp = tempfile.mkdtemp()
+    assert not crypto.is_initialized(tmp)
+    assert crypto.find_encrypted_roots(tmp) == []
+    src = os.path.join(tmp, "d")
+    _mktree(src)
+    assert not crypto.is_initialized(tmp)  # 有目录但未加密
+    encrypt_folder(KEY, src)
+    assert crypto.is_initialized(tmp)
+    roots = crypto.find_encrypted_roots(tmp)
+    assert len(roots) == 1 and roots[0].endswith(".svault")
+    shutil.rmtree(tmp)
+    print("✓ 初始化状态与加密根发现")
+
+
 if __name__ == "__main__":
+    test_kdf_vector()
     test_same_password_same_key()
+    test_initialized()
     test_roundtrip_file()
     test_wrong_password()
     test_tamper_detection()

@@ -27,9 +27,10 @@ PORT = int(os.environ.get("PORT", "8080"))
 
 app = FastAPI(title="Secure Vault", docs_url=None, redoc_url=None, openapi_url=None)
 
-# 内存会话：token -> master_key
-_sessions: dict[str, bytes] = {}
+# 内存会话：token -> {key: master_key, init: 创建会话时工作区是否已初始化}
+_sessions: dict[str, dict] = {}
 COOKIE_NAME = "svault_token"
+MIN_PASSWORD_LEN = 8
 
 # 后台任务：task_id -> {status, percent, done, total, current, error}
 _tasks: dict[str, dict] = {}
@@ -44,7 +45,14 @@ def _get_key(vault_token: str | None = Cookie(default=None, alias=COOKIE_NAME)) 
     sess = _sessions.get(token)
     if not sess:
         raise HTTPException(status_code=401, detail="未解锁")
-    return sess
+    return sess["key"]
+
+
+def _check_password_strength(password: str) -> str | None:
+    """返回强度错误信息，None 表示合格。"""
+    if len(password) < MIN_PASSWORD_LEN:
+        return f"密码至少 {MIN_PASSWORD_LEN} 位"
+    return None
 
 
 def _safe_path(rel: str) -> str:
@@ -76,30 +84,45 @@ async def index():
 # ---------------------------------------------------------------------------
 # 会话
 # ---------------------------------------------------------------------------
+@app.get("/api/status")
+async def status():
+    """报告工作区是否已初始化（无需会话）。未初始化时前端显示创建密码流程。"""
+    return {"initialized": crypto.is_initialized(VAULT_ROOT)}
+
+
 @app.post("/api/unlock")
 async def unlock(body: dict, response: Response):
     password = body.get("password", "")
     if not password:
         raise HTTPException(status_code=400, detail="密码不能为空")
-    key = crypto.derive_master_key(password)
-    password = None
+    confirmation = body.get("password_confirmation", "")
 
-    # 浅扫 VAULT_ROOT 一层，若有已加密目录则验证密码（否则无法即时判定对错，直接放行）
-    root = os.path.abspath(VAULT_ROOT)
-    if os.path.isdir(root):
-        for name in sorted(os.listdir(root)):
-            p = os.path.join(root, name)
-            if os.path.isdir(p) and os.path.isfile(os.path.join(p, crypto.INDEX_FILENAME)):
-                try:
-                    crypto.read_index(key, os.path.join(p, crypto.INDEX_FILENAME))
-                except ValueError:
-                    raise HTTPException(status_code=401, detail="密码错误")
-                break
+    initialized = crypto.is_initialized(VAULT_ROOT)
+
+    if initialized:
+        # 已初始化：单密码，派生后验证所有索引，任一失败即拒（统一提示，不泄露细节）
+        key = crypto.derive_master_key(password)
+        password = None
+        for index_path in crypto.find_encrypted_roots(VAULT_ROOT):
+            try:
+                crypto.read_index(key, index_path)
+            except ValueError:
+                raise HTTPException(status_code=401, detail="密码错误或索引损坏")
+    else:
+        # 未初始化：创建密码，要求两次一致 + 满足强度；密钥只派生到内存会话，
+        # 第一次成功加密并提交 .svault 时才正式建立。
+        if confirmation != password:
+            raise HTTPException(status_code=400, detail="两次输入的密码不一致")
+        msg = _check_password_strength(password)
+        if msg:
+            raise HTTPException(status_code=400, detail=msg)
+        key = crypto.derive_master_key(password)
+        password = None
 
     token = secrets.token_urlsafe(32)
-    _sessions[token] = key
+    _sessions[token] = {"key": key, "init": initialized}
     response.set_cookie(COOKIE_NAME, token, httponly=True, samesite="strict", max_age=86400)
-    return {"ok": True}
+    return {"ok": True, "initialized": initialized}
 
 
 @app.post("/api/lock")
@@ -149,6 +172,18 @@ def _new_task() -> str:
     return task_id
 
 
+def _invalidate_stale_init_sessions(current_token: str) -> None:
+    """首次加密建立 .svault 后，失效其它尚未初始化的旧会话。
+
+    避免两个并发会话用不同密码建立数据（DESIGN §3.3 首次使用第 4 点）。
+    """
+    if not crypto.is_initialized(VAULT_ROOT):
+        return
+    for tok in list(_sessions.keys()):
+        if tok != current_token and _sessions[tok].get("init") is False:
+            _sessions.pop(tok, None)
+
+
 def _progress_cb(task_id: str):
     def cb(done: int, total: int, current: str):
         with _tasks_lock:
@@ -164,7 +199,11 @@ def _progress_cb(task_id: str):
 # 加密 / 解密
 # ---------------------------------------------------------------------------
 @app.post("/api/encrypt")
-async def encrypt(body: dict, key: bytes = Depends(_get_key)):
+async def encrypt(
+    body: dict,
+    key: bytes = Depends(_get_key),
+    vault_token: str | None = Cookie(default=None, alias=COOKIE_NAME),
+):
     paths = body.get("paths") or []
     if not paths:
         raise HTTPException(status_code=400, detail="未选择目录")
@@ -172,10 +211,12 @@ async def encrypt(body: dict, key: bytes = Depends(_get_key)):
 
     task_id = _new_task()
     cb = _progress_cb(task_id)
+    token = vault_token or ""
 
     def work():
         for p in abs_paths:
             crypto.encrypt_folder(key, p, progress=cb)
+        _invalidate_stale_init_sessions(token)
 
     _run_task(task_id, work)
     return {"task_id": task_id}
