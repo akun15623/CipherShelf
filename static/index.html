@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>文件夹加解密</title>
+  <title>密架</title>
   <link rel="stylesheet" href="/static/element-plus.css">
   <style>
     :root {
@@ -116,7 +116,7 @@ const TEMPLATE = `
         <div class="lock-sub">请先点选要加密的数据文件夹</div>
         <div style="color:var(--text);font-size:13px;line-height:2;text-align:left;background:var(--card-hover);border-radius:10px;padding:14px 16px;margin-top:8px;">
           ① 打开飞牛「应用中心」<br>
-          ② 找到「文件夹加解密」→ 点「设置」<br>
+          ② 找到「密架」→ 点「设置」<br>
           ③ 在「授权目录」里点选数据文件夹<br>
           ④ 保存后重新启动本应用
         </div>
@@ -125,7 +125,7 @@ const TEMPLATE = `
 
       <template v-else>
         <div class="lock-icon">🔐</div>
-        <div class="lock-title">{{ needCreate ? '创建密码' : '文件夹加解密' }}</div>
+        <div class="lock-title">{{ needCreate ? '创建密码' : '密架' }}</div>
         <div class="lock-sub">{{ needCreate ? '首次使用：设置一个密码作为加解密密钥' : '输入密码进入（密码即加解密密钥）' }}</div>
 
         <template v-if="needCreate">
@@ -156,7 +156,7 @@ const TEMPLATE = `
 
   <div v-else class="app">
     <div class="topbar">
-      <span class="title">🔐 文件夹加解密</span>
+      <span class="title">🔐 密架</span>
       <el-button size="small" @click="doLock">锁定</el-button>
     </div>
 

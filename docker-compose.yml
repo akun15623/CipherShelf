@@ -1,10 +1,10 @@
-name: secure-vault
+name: ciphershelf
 
 services:
-  secure-vault:
+  ciphershelf:
     build: .
-    image: secure-vault:latest
-    container_name: secure-vault
+    image: ciphershelf:latest
+    container_name: ciphershelf
     restart: unless-stopped
     environment:
       VAULT_ROOT: /data        # 加解密操作的根目录

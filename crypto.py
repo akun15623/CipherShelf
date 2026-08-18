@@ -1,4 +1,4 @@
-"""Secure Vault encryption core.
+"""CipherShelf encryption core.
 
 New vaults use format v2. Format v1 remains readable for migration, but no
 new v1 data is written. V2 authenticates the full header and binds each file

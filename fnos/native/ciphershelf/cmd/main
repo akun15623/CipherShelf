@@ -58,7 +58,7 @@ start_app() {
         exit 1
     fi
 
-    log_msg "Starting secure-vault (data=$VAULT_ROOT port=$PORT)..."
+    log_msg "Starting ciphershelf (data=$VAULT_ROOT port=$PORT)..."
     cd "$APP_DIR" || exit 1
 
     VAULT_ROOT="$VAULT_ROOT" \
@@ -71,7 +71,7 @@ start_app() {
 }
 
 stop_app() {
-    log_msg "Stopping secure-vault..."
+    log_msg "Stopping ciphershelf..."
 
     if [ ! -f "$PID_FILE" ]; then
         return 0

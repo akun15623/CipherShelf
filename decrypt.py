@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-secure-vault 解密工具（CLI）
+CipherShelf 解密工具（CLI）
 
 解密（还原）一个已加密的文件夹：凭密码 + .svault 索引还原原文件名和目录结构。
 
@@ -22,7 +22,7 @@ import crypto
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="secure-vault 文件夹解密工具")
+    ap = argparse.ArgumentParser(description="CipherShelf 文件夹解密工具")
     ap.add_argument("path", help="已加密的文件夹路径（含 .svault）")
     ap.add_argument("-o", "--output", default=None, help="还原输出目录（缺省就地还原）")
     ap.add_argument("--password", default=None, help="密码（不推荐，会留 shell 历史；缺省交互输入）")

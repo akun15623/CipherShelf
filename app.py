@@ -1,4 +1,4 @@
-"""Secure Vault FastAPI service with bounded sessions and serialized mutations."""
+"""CipherShelf FastAPI service with bounded sessions and serialized mutations."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ LOGIN_WINDOW_SECONDS = 5 * 60
 LOGIN_MAX_FAILURES = 10
 STATUS_CACHE_SECONDS = 60
 
-app = FastAPI(title="Secure Vault", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="CipherShelf", docs_url=None, redoc_url=None, openapi_url=None)
 
 _sessions: dict[str, dict] = {}
 _sessions_lock = threading.Lock()

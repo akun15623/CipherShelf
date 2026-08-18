@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-secure-vault 加密工具（CLI）
+CipherShelf 加密工具（CLI）
 
 就地加密一个文件夹：文件内容加密、目录名/文件名变密文，目录结构保留，
 一个加密索引 .svault 记录 原名 <-> 密文 映射。
@@ -23,7 +23,7 @@ import crypto
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="secure-vault 文件夹加密工具")
+    ap = argparse.ArgumentParser(description="CipherShelf 文件夹加密工具")
     ap.add_argument("path", help="要加密的文件夹路径")
     ap.add_argument("--password", default=None, help="密码（不推荐，会留 shell 历史；缺省交互输入）")
     ap.add_argument("--yes", action="store_true", help="跳过确认提示")

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-CONTAINER_NAME="secure-vault"
+CONTAINER_NAME="ciphershelf"
 
 case "$1" in
 start)

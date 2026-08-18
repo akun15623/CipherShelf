@@ -1,6 +1,6 @@
 # 飞牛 fnOS 应用打包
 
-本目录把仓库根目录的 secure-vault 源码打包成飞牛 fnOS 应用（`.fpk`），提供两种形态：
+本目录把仓库根目录的 ciphershelf 源码打包成飞牛 fnOS 应用（`.fpk`），提供两种形态：
 
 | 形态 | 目录 | 数据目录选择 | 依赖 | 适用场景 |
 |------|------|------------|------|---------|
@@ -19,11 +19,11 @@ fnos/
 │   ├── build.sh              #   拷源码 → fnpack build
 │   ├── wheels/               #   预打包 cp312 依赖
 │   ├── README.md
-│   └── secure-vault/         #   fnpack 包骨架（app/server/ 由 build.sh 生成）
+│   └── ciphershelf/         #   fnpack 包骨架（app/server/ 由 build.sh 生成）
 └── docker/                   # Docker 形态（本地镜像）
     ├── build.sh              #   docker build → docker save → fnpack build
     ├── README.md
-    └── secure-vault/         #   fnpack 包骨架（compose 用本地镜像）
+    └── ciphershelf/         #   fnpack 包骨架（compose 用本地镜像）
 ```
 
 ## 构建
@@ -36,13 +36,13 @@ fnos/
 ./fnos/docker/build.sh
 ```
 
-产物分别在各自的 `secure-vault/secure-vault.fpk`。
+产物分别在各自的 `ciphershelf/ciphershelf.fpk`。
 
 ## 重新生成图标
 
 ```bash
-python3 fnos/gen_icons.py fnos/native/secure-vault
-python3 fnos/gen_icons.py fnos/docker/secure-vault
+python3 fnos/gen_icons.py fnos/native/ciphershelf
+python3 fnos/gen_icons.py fnos/docker/ciphershelf
 ```
 
 ## 形态选择建议

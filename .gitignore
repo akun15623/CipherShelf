@@ -5,8 +5,8 @@ __pycache__/
 .tmp-test-deps/
 
 # 飞牛 Native 打包：app/server/ 由 fnos/native/build.sh 从根目录生成，.fpk 为构建产物
-fnos/native/secure-vault/app/server/
+fnos/native/ciphershelf/app/server/
 *.fpk
 
 # 飞牛 Docker 打包：镜像 tar 由 fnos/docker/build.sh 导出（158MB，不提交）
-fnos/docker/secure-vault-image.tar
+fnos/docker/ciphershelf-image.tar

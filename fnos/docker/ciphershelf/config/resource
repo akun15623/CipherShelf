@@ -2,7 +2,7 @@
   "docker-project": {
     "projects": [
       {
-        "name": "secure-vault",
+        "name": "ciphershelf",
         "path": "docker"
       }
     ]

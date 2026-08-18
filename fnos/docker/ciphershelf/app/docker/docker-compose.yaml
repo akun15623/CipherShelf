@@ -1,7 +1,7 @@
 services:
-  secure-vault:
-    image: crpi-dberwpbq5bud3kxp.cn-chengdu.personal.cr.aliyuncs.com/akun15623/secure-vault:1.1.2
-    container_name: secure-vault
+  ciphershelf:
+    image: crpi-dberwpbq5bud3kxp.cn-chengdu.personal.cr.aliyuncs.com/akun15623/ciphershelf:1.1.2
+    container_name: ciphershelf
     restart: unless-stopped
     ports:
       - "${TRIM_SERVICE_PORT}:8080"

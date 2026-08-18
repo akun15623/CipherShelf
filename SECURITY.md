@@ -15,6 +15,6 @@ Include the affected version, deployment type, reproduction steps using syntheti
 ## Security boundaries
 
 - Anyone who knows the vault password can view names and request encryption/decryption of authorized paths.
-- Secure Vault does not protect against a compromised host, a process with permission to inspect its memory, or an administrator who can read the preset password environment variable.
+- CipherShelf does not protect against a compromised host, a process with permission to inspect its memory, or an administrator who can read the preset password environment variable.
 - Availability and recovery require independent backups. Encryption is not a backup mechanism.
 - HTTPS is required when traffic crosses an untrusted network.
