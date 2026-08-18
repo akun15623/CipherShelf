@@ -264,7 +264,7 @@ async def unlock(body: UnlockBody, request: Request, response: Response):
         if PRESET_PASSWORD is not None:
             if not secrets.compare_digest(password.encode("utf-8"), PRESET_PASSWORD.encode("utf-8")):
                 raise ValueError("密码错误或索引损坏")
-            key = crypto.derive_master_key(password)
+            key = crypto.KeyContext(crypto.derive_master_key(password))
             index_paths = crypto.find_encrypted_roots(VAULT_ROOT)
             for index_path in index_paths:
                 crypto.read_index(key, index_path)
@@ -273,7 +273,7 @@ async def unlock(body: UnlockBody, request: Request, response: Response):
             index_paths = crypto.find_encrypted_roots(VAULT_ROOT)
             initialized = bool(index_paths)
         if PRESET_PASSWORD is None and initialized:
-            key = crypto.derive_master_key(password)
+            key = crypto.KeyContext(crypto.derive_master_key(password))
             for index_path in index_paths:
                 crypto.read_index(key, index_path)
         elif PRESET_PASSWORD is None:
@@ -282,7 +282,7 @@ async def unlock(body: UnlockBody, request: Request, response: Response):
             message = _check_password_strength(password)
             if message:
                 raise HTTPException(status_code=400, detail=message)
-            key = crypto.derive_master_key(password)
+            key = crypto.KeyContext(crypto.derive_master_key(password))
     except HTTPException:
         _record_login_failure(request)
         raise

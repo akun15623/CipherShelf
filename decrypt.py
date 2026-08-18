@@ -44,7 +44,7 @@ def main() -> int:
         print("✗ 密码不能为空", file=sys.stderr)
         return 2
 
-    key = crypto.derive_master_key(password)
+    key = crypto.KeyContext(crypto.derive_master_key(password))
     password = None  # 用完即弃
 
     # 先验证密码（读索引）

@@ -34,13 +34,13 @@ def write_raw_v2_index(path, entries):
     vault_key = crypto._derive_vault_key(KEY, vault_salt)
     base = (
         crypto.MAGIC
-        + bytes([crypto.VERSION, crypto.KDF_ID_PBKDF2_SHA256])
+        + bytes([crypto.INDEX_V2_VERSION, crypto.KDF_ID_PBKDF2_SHA256])
         + crypto.ITERATIONS.to_bytes(4, "big")
         + crypto.DEFAULT_SALT
         + vault_salt
     )
     nonce = os.urandom(crypto.NONCE_SIZE)
-    data = json.dumps({"magic": "SVLT", "version": crypto.VERSION, "entries": entries}).encode()
+    data = json.dumps({"magic": "SVLT", "version": crypto.INDEX_V2_VERSION, "entries": entries}).encode()
     ciphertext = AESGCM(vault_key).encrypt(nonce, data, base + b"index")
     with open(path, "wb") as stream:
         stream.write(base + nonce + ciphertext)
@@ -75,6 +75,49 @@ class CryptoTests(unittest.TestCase):
         self.assertEqual(key.hex(), "737d703b7454ea13eb5f9de1972bf9e6d154001e0415c1a04526a8490adeab06")
         with self.assertRaises(ValueError):
             crypto.derive_master_key("secure-vault-test-password", iterations=1)
+
+    def test_v3_uses_unique_per_vault_pbkdf2_salts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            salts = []
+            context = crypto.KeyContext(KEY)
+            for name in ("one", "two"):
+                root = os.path.join(tmp, name)
+                os.makedirs(root)
+                with open(os.path.join(root, "file.txt"), "wb") as stream:
+                    stream.write(name.encode())
+                crypto.encrypt_folder(context, root)
+                with open(os.path.join(root, crypto.INDEX_FILENAME), "rb") as stream:
+                    self.assertEqual(stream.read(5), crypto.MAGIC + bytes([crypto.INDEX_VERSION]))
+                    self.assertEqual(stream.read(1), bytes([crypto.KDF_ID_PBKDF2_SHA256]))
+                    self.assertEqual(int.from_bytes(stream.read(4), "big"), crypto.ITERATIONS)
+                    salts.append(stream.read(crypto.KDF_SALT_SIZE))
+
+            self.assertNotEqual(salts[0], salts[1])
+            self.assertNotEqual(
+                crypto._derive_v3_vault_key(KEY, salts[0]),
+                crypto._derive_v3_vault_key(KEY, salts[1]),
+            )
+            fresh_context = crypto.KeyContext(KEY)
+            with patch(
+                "crypto._derive_v3_vault_key_uncached",
+                wraps=crypto._derive_v3_vault_key_uncached,
+            ) as derive:
+                index = os.path.join(tmp, "one", crypto.INDEX_FILENAME)
+                crypto.read_index(fresh_context, index)
+                crypto.read_index(fresh_context, index)
+                self.assertEqual(derive.call_count, 1)
+            with self.assertRaisesRegex(ValueError, "密码错误"):
+                crypto.read_index(
+                    crypto.derive_master_key("wrong-password"),
+                    os.path.join(tmp, "one", crypto.INDEX_FILENAME),
+                )
+            with open(os.path.join(tmp, "one", crypto.INDEX_FILENAME), "r+b") as stream:
+                stream.seek(10)
+                value = stream.read(1)
+                stream.seek(-1, os.SEEK_CUR)
+                stream.write(bytes([value[0] ^ 1]))
+            with self.assertRaisesRegex(ValueError, "密码错误"):
+                crypto.read_index(KEY, os.path.join(tmp, "one", crypto.INDEX_FILENAME))
 
     def test_file_roundtrip_and_wrong_key(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -129,7 +172,7 @@ class CryptoTests(unittest.TestCase):
             make_tree(root)
             self.assertEqual(crypto.encrypt_folder(KEY, root), 5)
             with open(os.path.join(root, crypto.INDEX_FILENAME), "rb") as stream:
-                self.assertEqual(stream.read(5), crypto.MAGIC + bytes([crypto.VERSION]))
+                self.assertEqual(stream.read(5), crypto.MAGIC + bytes([crypto.INDEX_VERSION]))
             entries = crypto.read_index(KEY, os.path.join(root, crypto.INDEX_FILENAME))
             travel = next(entry for entry in entries if entry["orig"] == "2024/旅行")
             year = next(entry for entry in entries if entry["orig"] == "2024")
@@ -256,6 +299,41 @@ class CryptoTests(unittest.TestCase):
             crypto.decrypt_folder(KEY, root)
             with open(os.path.join(root, "old.txt"), "rb") as stream:
                 self.assertEqual(stream.read(), b"legacy-data")
+
+    def test_legacy_v2_vault_can_be_decrypted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "legacy-v2")
+            os.makedirs(root)
+            plain = os.path.join(tmp, "plain")
+            with open(plain, "wb") as stream:
+                stream.write(b"legacy-v2-data")
+            vault_salt = os.urandom(16)
+            vault_key = crypto._derive_vault_key(KEY, vault_salt)
+            enc_name = uuid.uuid4().hex
+            file_id, digest = crypto.encrypt_file(vault_key, plain, os.path.join(root, enc_name))
+            entries = [{
+                "type": "file", "orig": "old-v2.txt", "enc": enc_name,
+                "file_id": file_id, "sha256": digest,
+                "size": 14, "mtime": 0,
+            }]
+            base = (
+                crypto.MAGIC
+                + bytes([crypto.INDEX_V2_VERSION, crypto.KDF_ID_PBKDF2_SHA256])
+                + crypto.ITERATIONS.to_bytes(4, "big")
+                + crypto.DEFAULT_SALT
+                + vault_salt
+            )
+            nonce = os.urandom(crypto.NONCE_SIZE)
+            payload = json.dumps({
+                "magic": "SVLT", "version": crypto.INDEX_V2_VERSION, "entries": entries,
+            }).encode()
+            ciphertext = AESGCM(vault_key).encrypt(nonce, payload, base + b"index")
+            with open(os.path.join(root, crypto.INDEX_FILENAME), "wb") as stream:
+                stream.write(base + nonce + ciphertext)
+
+            crypto.decrypt_folder(KEY, root)
+            with open(os.path.join(root, "old-v2.txt"), "rb") as stream:
+                self.assertEqual(stream.read(), b"legacy-v2-data")
 
 
 if __name__ == "__main__":

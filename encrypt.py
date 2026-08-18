@@ -48,7 +48,7 @@ def main() -> int:
         print("✗ 密码至少 12 位", file=sys.stderr)
         return 2
 
-    key = crypto.derive_master_key(password)
+    key = crypto.KeyContext(crypto.derive_master_key(password))
     password = None  # 用完即弃
 
     # 操作摘要

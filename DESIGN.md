@@ -2,9 +2,9 @@
 
 | 项目 | 内容 |
 |------|------|
-| 文档版本 | v2.0 |
-| 状态 | 已实现；v1 仅保留解密兼容 |
-| 日期 | 2026-08-18 |
+| 文档版本 | v3.0 |
+| 状态 | 已实现；v1/v2 索引仅保留解密兼容 |
+| 日期 | 2026-08-19 |
 | 目标产品 | 文件夹就地加解密工具（替代原加密网盘） |
 
 ---
@@ -46,35 +46,35 @@ secure-vault 原为「自托管加密网盘」，具备多层级目录、文件�
 └─────────────┘      └──────────────────────────┘
 ```
 
-- `crypto.py` 是**无状态核心库**：输入（路径 + 密钥/密码）→ 操作文件并返回结果，不依赖数据库、不持有会话。由于它包含文件系统读写，不能称为数学意义上的纯函数；可测试的格式编解码与路径校验应尽量拆成无副作用函数。
+- `crypto.py` 是共享加密核心：输入（路径 + 密钥上下文）→ 操作文件并返回结果，不依赖数据库。`KeyContext` 只在进程内缓存已经派生的 v3 数据密钥，避免重复 KDF；格式编解码与路径校验仍尽量保持无副作用。
 - `app.py` 负责 Web 会话、目录树懒加载、任务调度；`encrypt.py`/`decrypt.py` 是 CLI 薄壳。
 - 三处共用同一 `crypto.py`，保证 Web 与 CLI 加密结果**完全一致、可互换**。
 
 ---
 
-## 3. 密钥模型：密码根密钥 + 每目录独立数据密钥
+## 3. 密钥模型：兼容密码根密钥 + 每目录随机盐 KDF
 
 ```
-password ──PBKDF2-HMAC-SHA256(DEFAULT_SALT, iterations)──▶ password_root_key
-password_root_key + random vault_salt ──HKDF-SHA256──▶ vault_key (32 B)
+password ──PBKDF2-HMAC-SHA256(legacy_salt, 600000)──▶ password_root_key
+password_root_key ──PBKDF2-HMAC-SHA256(random kdf_salt, 600000)──▶ v3 vault_key (32 B)
 ```
 
-- `DEFAULT_SALT`：代码内置常量（16 字节），**固定不变**，保证「同一密码 = 同一密钥」。
-- `iterations`：格式 v2 固定为 600000，并写入 `.svault` 明文头、绑定到索引 AAD；v1 保留旧格式解密兼容。未来调整 KDF 参数必须提升格式版本并提供显式迁移。
-- 每个加密根生成独立随机 `vault_salt`，文件和索引使用对应 `vault_key`；不同目录不直接复用 AES 密钥。
+- 第一层固定参数只用于保持 v1/v2 兼容，不能单独作为新数据的数据密钥。
+- v3 为每个加密根生成独立随机 `kdf_salt`，第二次 PBKDF2 的算法、盐和迭代次数写入 `.svault` 明文头并绑定索引 AAD。攻击者即使预计算第一层，也必须为每个保险库重新承担 600000 次 KDF 成本。
+- 文件和索引使用第二层得到的 `vault_key`；不同目录不复用 AES 密钥。Web/CLI 的 `KeyContext` 只在当前进程内按 salt 缓存结果。
 - 无 per-file 独立密钥、无 vault.db、无二次封装。
 
 ### 3.1 密码验证（关键设计）
-单密钥 + 固定 salt 下，**不再需要单独的 verifier**：
-- **加密**：派生 master_key → 加密各文件 + 加密索引。
-- **解密**：派生 master_key → 直接尝试解密索引。
+不需要单独的 verifier：
+- **加密**：派生 password-root key → 为目录生成随机 `kdf_salt` → 派生 vault_key → 加密各文件和索引。
+- **解密**：派生 password-root key → 读取索引头的版本/KDF 参数 → 派生对应 vault_key → 尝试解密索引。
   - 密码正确 → 索引 GCM 认证通过 → 得到映射。
   - 密码错误 → 索引 GCM 认证失败 → **立即拒绝**（不会动任何文件）。
 
 索引的 GCM 认证标签天然就是「密码校验器」，省去 verifier 字段。
 
 ### 3.2 安全权衡（已确认接受）
-固定 PBKDF2 salt 仍意味着相同密码产生相同 password-root key，但 v2 再结合每目录随机 `vault_salt` 派生独立数据密钥，阻止跨目录密文/索引直接替换。默认 60 万次 PBKDF2，并要求至少 12 位密码。同一个 `VAULT_ROOT` 下的目录仍由同一密码解锁。
+第一层固定 PBKDF2 salt 仍会产生相同 password-root key，这是读取 v1/v2 的兼容约束；v3 的第二层随机盐 PBKDF2 消除了跨保险库复用昂贵破解结果的问题。合法用户首次打开每个 v3 保险库需要额外一次 KDF，随后在当前会话缓存。默认每层 60 万次 PBKDF2，并要求至少 12 位密码。同一个 `VAULT_ROOT` 下的目录仍由同一密码解锁。
 
 ### 3.3 密码建立、主密钥生命周期与重新部署
 
@@ -85,7 +85,7 @@ password_root_key + random vault_salt ──HKDF-SHA256──▶ vault_key (32 B
   + FORMAT_V1_SALT（程序内固定公开常量）
   + FORMAT_V1_ITERATIONS = 600000
   ──────────────────────────────────────
-  = master_key（32 字节，仅存在于当前进程内存）
+  = password_root_key（32 字节，仅存在于当前进程内存）
 ```
 
 密码根 KDF 的兼容常量必须保持不可变并受测试保护：
@@ -115,9 +115,9 @@ expected hex:     737d703b7454ea13eb5f9de1972bf9e6d154001e0415c1a04526a8490adeab
 #### 已初始化后的解锁
 
 1. 用户每次进入 Web、执行 CLI 或服务重启后重新输入密码。
-2. 程序用兼容常量重新派生 password-root key，再按每个 v2 索引的 `vault_salt` 派生数据密钥并验证索引；v1 直接使用旧 key 验证。
-3. 全部索引认证及 schema 校验成功才创建 Web 会话；失败统一返回“密码错误或索引损坏”。
-4. Web 中 master key 只保存在服务端进程内存，通过随机会话 token 间接引用；浏览器 Cookie 只有 token，不含密码或密钥。CLI 中 master key 只存在于本次命令运行期间。
+2. 程序用兼容常量重新派生 password-root key，再按索引版本派生或选择数据密钥并验证索引。
+3. v3 按各索引随机盐派生数据密钥；v2 按旧 `vault_salt`/HKDF 路径读取；v1 直接使用旧 key。全部索引认证及 schema 校验成功才创建 Web 会话；失败统一返回“密码错误或索引损坏”。
+4. Web 中 password-root key 和派生密钥缓存只保存在服务端进程内存，通过随机会话 token 间接引用；iframe 场景的浏览器 JavaScript 内存持有 Bearer token，但不持有密码或密钥。CLI 密钥上下文只存在于本次命令运行期间。
 5. 锁定、会话过期或进程退出时删除密钥引用并尽力清理可变缓冲；Python/操作系统不能保证物理内存已可靠清零，生产环境应禁用 core dump 并使用加密 swap 或关闭 swap。
 
 #### 重新部署与数据恢复
@@ -173,7 +173,7 @@ expected hex:     737d703b7454ea13eb5f9de1972bf9e6d154001e0415c1a04526a8490adeab
 61       ...    数据块序列
 
 base_header = magic + version + chunk_size + block_count + file_id
-header_tag = AES-GCM(master_key, header_nonce, plaintext=b"",
+header_tag = AES-GCM(vault_key, header_nonce, plaintext=b"",
                      AAD=base_header + b"file-header")
 
 每个块: [nonce 12B][ciphertext + GCM tag 16B]
@@ -193,7 +193,7 @@ AAD = base_header + b"block" + block_index(8B BE)
 ```json
 {
   "magic": "SVLT",
-  "version": 2,
+  "version": 3,
   "entries": [
     {"type": "dir",  "orig": "2024",          "enc": "9f3a2c7e..."},
     {"type": "file", "orig": "2024/旅行.jpg",  "enc": "9f3a2c7e.../c7e2f0a9...", "file_id": "d8d50e...", "sha256": "...", "size": 12345, "mtime": 1710000000},
@@ -209,24 +209,24 @@ AAD = base_header + b"block" + block_index(8B BE)
 - `sha256`：明文摘要，仅存在于加密索引中；解密后再次核对，用于发现错误映射或实现缺陷。
 - `size` / `mtime`：文件元数据（用于还原时间戳、树显示大小）。
 
-**落盘加密格式**（整个 JSON 用 master_key AES-GCM 加密）：
+**v3 落盘加密格式**（整个 JSON 用 vault_key AES-GCM 加密）：
 
 ```
 偏移  大小  字段
 0     4     magic = "SVLT"
-4     1     version = 2
+4     1     version = 3
 5     1     kdf_id = 1（PBKDF2-HMAC-SHA256）
 6     4     iterations (uint32 BE)
-10    16    password_root_salt（v2 固定常量）
-26    16    vault_salt（每个加密根随机）
-42    12    nonce（随机）
-54    ...   ciphertext + GCM tag 16B
+10    16    kdf_salt（每个加密根随机）
+26    12    nonce（随机）
+38    ...   ciphertext + GCM tag 16B
 
-index_header = magic + version + kdf_id + iterations + password_root_salt + vault_salt
+vault_key = PBKDF2-HMAC-SHA256(password_root_key, kdf_salt, iterations)
+index_header = magic + version + kdf_id + iterations + kdf_salt
 AAD = index_header + b"index"
 ```
 
-解密端只接受支持的 `version`、`kdf_id`；格式 v2 的 `iterations` 必须严格等于 600000。v1 仅用于兼容解密。索引解密后必须校验 JSON schema、条目唯一性、`orig`/`enc` 路径安全性、`file_id`、SHA-256 以及文件/目录关系。
+解密端只接受支持的 `version`、`kdf_id`；v2/v3 的 `iterations` 必须严格等于 600000，避免攻击者通过头字段制造 KDF 资源耗尽。v1/v2 仅用于兼容解密。索引解密后必须校验 JSON schema、条目唯一性、`orig`/`enc` 路径安全性、`file_id`、SHA-256 以及文件/目录关系。
 
 ---
 
@@ -236,7 +236,7 @@ AAD = index_header + b"index"
 
 ```
 输入: root_dir（绝对路径）, password
-1. 派生 master_key
+1. 派生 password-root key，生成随机 `kdf_salt`，再派生 v3 vault_key
 2. 扫描: os.walk 收集所有文件（稳定排序），统计总字节数（用于进度）；跳过符号链接，并拒绝已有 `.svault`、事务目录或保留文件名冲突
 3. 在 root_dir 同一文件系统的父目录创建 staging_dir 和事务日志 `.svault-txn-<uuid>.json`
 4. 对每个子目录（父目录优先）生成密文名、建立完整 orig→enc 映射，并在 staging_dir 创建密文目录
@@ -260,7 +260,7 @@ AAD = index_header + b"index"
 
 ```
 输入: root_dir（含 .svault）, password, output_dir(可选，默认原地)
-1. 读取并校验 `.svault` 明文头中的 version / KDF 参数，再派生 master_key
+1. 派生兼容 password-root key，读取并校验 `.svault` 明文头中的 version / KDF 参数；v3 再按随机 `kdf_salt` 派生 vault_key
 2. 解密 `.svault` → 得到索引 entries（GCM 失败 = 密码错或索引损坏，立即返回，不碰任何文件）
 3. 完整校验索引 schema、重复路径、file_id、路径边界和磁盘对象类型（见 §9）
 4. 在最终目标同一文件系统创建临时输出目录，对每个 file entry:
@@ -300,7 +300,7 @@ python3 decrypt.py /data/照片 -o /restore/照片
 ```
 
 - 密码用 `getpass` 交互输入：不回显、不进日志、不写 shell 历史。
-- 加密固定使用格式 v2 的 600000 次迭代；解密从 `.svault` 读取并严格验证 KDF 参数，不提供命令行覆盖。
+- 新加密固定使用格式 v3 的第二层 600000 次迭代；解密从 `.svault` 读取并严格验证 KDF 参数，不提供命令行覆盖。
 - 加密/解密前打印操作摘要（目录、文件数、总大小），`--yes` 跳过二次确认。
 - 退出码：`0` 成功、`1` 操作失败、`2` 参数错误、`3` 密码错误。
 
@@ -376,11 +376,11 @@ python3 decrypt.py /data/照片 -o /restore/照片
 
 ## 8. 后端 API 规格
 
-统一前缀 `/api`，会话使用 256-bit CSPRNG 生成的不透明随机 token，通过 `httpOnly` cookie 保存，token 不暴露给 JS。服务端会话只在内存保存 master key，进程重启即失效：
+统一前缀 `/api`，会话使用 256-bit CSPRNG 生成的不透明随机 token。普通同源访问使用 `httpOnly` Cookie；飞牛跨站 iframe 因 `SameSite=Strict` Cookie 可能被拒存，解锁响应同时把 token 返回给前端并仅保存在 JavaScript 内存中，后续通过 `Authorization: Bearer` 发送。服务端会话只在内存保存 `KeyContext`，进程重启即失效：
 
 - Cookie：`HttpOnly`、`SameSite=Strict`、有限 `Path`，生产 HTTPS 下必须 `Secure`；空闲 30 分钟或最长 8 小时后失效。
 - 状态变更接口只接受同源请求：关闭 CORS，校验 `Origin`（无 Origin 时校验 `Referer`），并要求自定义头 `X-SVault-Request: 1`。
-- `/api/lock`、会话过期和服务关闭时删除会话引用并尽力清理密钥缓冲；Python 运行时不能承诺可靠内存擦除，文档不得声称已物理清零。
+- `/api/lock` 必须统一解析 Bearer/Cookie 并删除实际 token 对应的会话；会话过期和服务关闭时删除会话引用并尽力清理密钥缓冲。Python 运行时不能承诺可靠内存擦除，文档不得声称已物理清零。
 - API 日志禁止记录密码、Cookie、绝对文件名和请求体；错误响应不得回显服务器绝对路径。
 - 同一时刻仅允许一个磁盘变更任务；任务队列必须拒绝重叠路径，避免父子目录或两个会话同时修改同一数据。
 - Web API 中的所有 `path`、`paths`、`output` 都使用相对 `VAULT_ROOT` 的 `/` 分隔路径；绝对路径一律拒绝。绝对路径只存在于后端内部和 CLI，不返回浏览器。
@@ -403,9 +403,9 @@ python3 decrypt.py /data/照片 -o /restore/照片
 首次尚未加密: { "ok": true, "initialized": false }
 失败: 401 { "detail": "密码错误或索引损坏" }
 ```
-> 注意：固定 salt 模型下，「密码错误」只有在真正解密某处时才能判定。
+> 注意：系统没有独立 verifier，「密码错误」只有在真正解密某个索引时才能判定。
 > 后端应发现 `VAULT_ROOT` 下的加密根（遇到 `.svault` 后不再进入其密文子目录），派生一次 master key，并验证所有发现的索引；任一索引认证或 schema 校验失败都不创建会话，统一返回“密码错误或索引损坏”。
-> 若根下无任何加密内容，则密码无法即时验证；此时必须要求 `password_confirmation` 一致才创建未初始化会话。第一次成功加密会使其他未初始化会话失效。v2 为每个目录派生独立数据密钥。
+> 若根下无任何加密内容，则密码无法即时验证；此时必须要求 `password_confirmation` 一致才创建未初始化会话。第一次成功加密会使其他未初始化会话失效。v3 为每个目录执行随机盐 KDF 并派生独立数据密钥。
 
 ### 8.3 `POST /api/lock`
 ```
@@ -469,7 +469,7 @@ python3 decrypt.py /data/照片 -o /restore/照片
 | 路径穿越（恶意索引/密文）| 解密时 `os.path.realpath` 规范化，拒绝 `../`、绝对路径、符号链接、越界 |
 | 密文块篡改/重排/跨文件替换 | GCM tag + AAD 绑定完整文件头、`file_id` 和 `block_index`；索引认证 file_id 与密文路径 |
 | 空文件或文件头伪造 | 独立 `header_nonce` + `header_tag` 认证完整头部，空文件也必须验证 |
-| 恶意 KDF 参数耗尽资源 | 解密前验证 kdf_id，并要求格式 v2 的 iterations 严格等于 600000，再执行密钥派生 |
+| 恶意 KDF 参数耗尽资源 | 解密前验证 kdf_id，并要求格式 v2/v3 的 iterations 严格等于 600000，再执行密钥派生 |
 | 密码暴力破解 | 60 万次 PBKDF2 提高成本；强密码提示 |
 | 加密中途失败或崩溃丢数据 | 同文件系统 staging + backup + 事务日志，启动时恢复（见 §5.3） |
 | Web 越权访问 NAS 路径 | 容器只挂载 `VAULT_ROOT`，路径校验拒绝根外访问 |
@@ -590,7 +590,7 @@ services:
 
 | 风险 | 影响 | 缓解 |
 |------|------|------|
-| 固定 PBKDF2 salt 便于跨库预计算 | 中 | 强密码 + 高迭代；v2 使用随机 vault_salt 隔离实际数据密钥 |
+| v1/v2 固定 PBKDF2 根 salt 可跨库预计算 | 中（旧格式） | 新写入 v3 使用每保险库随机盐的第二层 600000 次 PBKDF2；使用同一密码的全部旧数据和旧备份都需迁移或受控保存，否则旧副本仍可用于验证密码猜测 |
 | 忘密码 = 数据永久不可读 | 高 | README 醒目提示；无找回后门是设计使然 |
 | 重构误改固定 salt/KDF 导致旧数据不可读 | 高 | v1 常量冻结 + 固定测试向量 + 格式版本迁移，禁止静默修改 |
 | 重新部署丢失 `.svault` 或挂错卷 | 高 | 整目录备份、保留隐藏文件、部署前核对挂载、定期做副本恢复演练 |
@@ -608,13 +608,13 @@ services:
 |---|------|------|
 | 1 | 加解密形态 | 就地加密 + 文件名加密 + 索引 |
 | 2 | 目录结构 | **保留原结构**，目录名/文件名变密文 |
-| 3 | 密钥模型 | 一个密码根密钥；每个加密目录通过随机 salt 派生独立数据密钥 |
+| 3 | 密钥模型 | 一个兼容密码根密钥；v3 每个加密目录通过随机盐 PBKDF2 派生独立数据密钥 |
 | 4 | 前端结构 | **上下结构**：上文件夹树（多选）+ 下加密/解密按钮 |
 | 5 | 预览 | 不支持预览，已加密内容显示原文件名 + 🔒 标记 |
 | 6 | 进入方式 | 前端进入需输密码，密码即密钥 |
 | 7 | 设备适配 | PC + 移动端响应式（同一上下结构） |
 | 8 | 文件身份绑定 | 每个文件随机 file_id，绑定索引、文件头和所有块 AAD，防止跨文件替换 |
-| 9 | KDF 参数 | 格式 v2 固定 PBKDF2-HMAC-SHA256 / 600000 次，并在索引头认证；v1 只读兼容 |
+| 9 | KDF 参数 | v3 第二层固定 PBKDF2-HMAC-SHA256 / 600000 次并认证随机盐与参数；v1/v2 只读兼容 |
 | 10 | 崩溃一致性 | 同文件系统 staging + backup + 事务日志，可恢复，不承诺跨文件系统原子切换 |
 | 11 | 独立目录解密 | 视为导出，成功后保留原密文；只有原地解密才在验证后清理密文 backup |
 | 12 | 主密钥存储 | 不持久化；只在 Web/CLI 进程内存存在，由用户每次输入密码确定性派生 |
@@ -643,3 +643,13 @@ services:
 3. 安全性偏移：密码明文存在于 compose/容器环境，偏离 §3.3「主密钥不写环境变量」的原则，属**可选偏离**；仅建议在可信单用户环境使用，文档标注了权限与 git 提交风险。
 4. 改 `VAULT_PASSWORD` 值等价于更换密钥；预设密码与已有 `.svault` 不匹配时，解锁统一返回「密码错误或索引损坏」。
 5. 不设 `VAULT_PASSWORD` 时行为与 v1.1 完全一致（保持向后兼容）。
+
+---
+
+## 19. v3.0 修订摘要（随机盐 KDF）
+
+1. 新写入的 `.svault` 索引版本提升为 v3；文件密文继续使用已认证的 v2 文件格式。
+2. v3 索引头保存每保险库随机 `kdf_salt`，使用 password-root key 作为输入再执行 600000 次 PBKDF2-HMAC-SHA256，消除固定根 salt 带来的跨保险库预计算复用。
+3. `kdf_id`、迭代次数和随机盐全部纳入索引 AAD；篡改任一字段都会导致认证失败。
+4. `KeyContext` 在单次 Web/CLI 会话内按 salt 缓存派生结果，避免目录树重复加载造成重复 KDF；缓存不落盘。
+5. v1/v2 索引继续解密兼容但不再新写入；迁移方式是用旧密码解密后重新加密。

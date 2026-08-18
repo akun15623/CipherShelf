@@ -68,6 +68,13 @@ class AppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         result = self.wait_task(response.json()["task_id"])
         self.assertEqual(result["status"], "done", result)
+        response = self.client.post("/api/lock", headers=HEADERS)
+        self.assertEqual(response.status_code, 200, response.text)
+        response = self.client.post(
+            "/api/unlock", headers=HEADERS, json={"password": PASSWORD},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["initialized"])
         response = self.client.post("/api/decrypt", headers=HEADERS, json={"paths": ["docs"]})
         self.assertEqual(response.status_code, 200, response.text)
         result = self.wait_task(response.json()["task_id"])

@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Only the latest release receives security fixes. Format v1 is supported for decryption and migration only; new data is written as format v2.
+Only the latest release receives security fixes. Index formats v1 and v2 are supported for decryption and migration only; new indexes are written as format v3. Encrypted files continue to use the authenticated v2 file format.
 
 ## Reporting a vulnerability
 

@@ -1,8 +1,8 @@
 """CipherShelf encryption core.
 
-New vaults use format v2. Format v1 remains readable for migration, but no
-new v1 data is written. V2 authenticates the full header and binds each file
-to the encrypted index with a random file_id and plaintext digest.
+New indexes use format v3 with a random per-vault PBKDF2 salt. Encrypted files
+remain on the authenticated v2 format. Legacy v1/v2 indexes remain readable
+for migration, but no new legacy indexes are written.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import re
 import shutil
 import stat
 import tempfile
+import threading
 import uuid
 from pathlib import PurePosixPath
 
@@ -27,7 +28,11 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 MAGIC = b"SVLT"
 LEGACY_VERSION = 1
-VERSION = 2
+FILE_VERSION = 2
+INDEX_V2_VERSION = 2
+INDEX_VERSION = 3
+# Public alias for the current index format. File format has its own version.
+VERSION = INDEX_VERSION
 KEY_SIZE = 32
 NONCE_SIZE = 12
 TAG_SIZE = 16
@@ -36,6 +41,7 @@ ITERATIONS = 600_000
 KDF_ID_PBKDF2_SHA256 = 1
 DEFAULT_SALT = b"SVLT-PBKDF2-v1!!"
 INDEX_FILENAME = ".svault"
+MAX_DERIVED_KEYS = 256
 
 FILE_HEADER_V1_SIZE = 4 + 1 + 4 + 4
 FILE_BASE_HEADER_V2_SIZE = 4 + 1 + 4 + 8 + 16
@@ -45,6 +51,7 @@ MAX_INDEX_SIZE = 64 * 1024 * 1024
 MAX_INDEX_ENTRIES = 1_000_000
 MAX_XATTR_BYTES = 1024 * 1024
 VAULT_KEY_INFO = b"secure-vault/v2/vault-key"
+KDF_SALT_SIZE = 16
 
 _HEX32 = re.compile(r"^[0-9a-f]{32}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -53,7 +60,12 @@ _RESERVED_PREFIXES = (".svault-stage-", ".svault-backup-", ".svault-txn-")
 
 
 def derive_master_key(password: str, salt: bytes = DEFAULT_SALT, iterations: int = ITERATIONS) -> bytes:
-    """Derive the password-root key; v1/v2 KDF parameters are frozen."""
+    """Derive the legacy-compatible password-root key.
+
+    V3 applies a second, per-vault salted PBKDF2 step before this key is used
+    for encryption. The fixed root derivation remains frozen so v1/v2 data is
+    still readable.
+    """
     if not isinstance(password, str) or not password:
         raise ValueError("密码不能为空")
     if salt != DEFAULT_SALT or iterations != ITERATIONS:
@@ -63,7 +75,64 @@ def derive_master_key(password: str, salt: bytes = DEFAULT_SALT, iterations: int
     ).derive(password.encode("utf-8"))
 
 
+class KeyContext:
+    """Session-scoped password-root key with a bounded v3 derivation cache."""
+
+    def __init__(self, master_key: bytes):
+        self.master_key = _validate_master_key(master_key)
+        self._v3_keys: dict[bytes, bytes] = {}
+        self._lock = threading.Lock()
+
+    def v3_key(self, kdf_salt: bytes) -> bytes:
+        salt = _validate_kdf_salt(kdf_salt)
+        with self._lock:
+            key = self._v3_keys.get(salt)
+            if key is None:
+                key = _derive_v3_vault_key_uncached(self.master_key, salt)
+                if len(self._v3_keys) >= MAX_DERIVED_KEYS:
+                    self._v3_keys.pop(next(iter(self._v3_keys)))
+                self._v3_keys[salt] = key
+            return key
+
+
+def _validate_master_key(master_key: bytes) -> bytes:
+    if not isinstance(master_key, bytes) or len(master_key) != KEY_SIZE:
+        raise ValueError("主密钥必须是 32 字节")
+    return master_key
+
+
+def _validate_kdf_salt(kdf_salt: bytes) -> bytes:
+    if not isinstance(kdf_salt, bytes) or len(kdf_salt) != KDF_SALT_SIZE:
+        raise ValueError("索引 KDF salt 长度错误")
+    return kdf_salt
+
+
+def _as_key_context(key_material: bytes | KeyContext) -> KeyContext:
+    return key_material if isinstance(key_material, KeyContext) else KeyContext(key_material)
+
+
+def _root_key(key_material: bytes | KeyContext) -> bytes:
+    if isinstance(key_material, KeyContext):
+        return key_material.master_key
+    return _validate_master_key(key_material)
+
+
+def _derive_v3_vault_key_uncached(master_key: bytes, kdf_salt: bytes) -> bytes:
+    return PBKDF2HMAC(
+        algorithm=hashes.SHA256(), length=KEY_SIZE,
+        salt=_validate_kdf_salt(kdf_salt), iterations=ITERATIONS,
+    ).derive(_validate_master_key(master_key))
+
+
+def _derive_v3_vault_key(key_material: bytes | KeyContext, kdf_salt: bytes) -> bytes:
+    if isinstance(key_material, KeyContext):
+        return key_material.v3_key(kdf_salt)
+    return _derive_v3_vault_key_uncached(key_material, kdf_salt)
+
+
 def _derive_vault_key(master_key: bytes, vault_salt: bytes) -> bytes:
+    """Derive the legacy v2 vault key."""
+    master_key = _validate_master_key(master_key)
     if len(vault_salt) != 16:
         raise ValueError("索引 vault_salt 长度错误")
     return HKDF(
@@ -112,7 +181,7 @@ def encrypt_file(
     if len(file_id_bytes) != 16:
         raise ValueError("file_id 必须是 16 字节")
     base_header = (
-        MAGIC + bytes([VERSION]) + BLOCK_SIZE.to_bytes(4, "big")
+        MAGIC + bytes([FILE_VERSION]) + BLOCK_SIZE.to_bytes(4, "big")
         + block_count.to_bytes(8, "big") + file_id_bytes
     )
     aes = AESGCM(master_key)
@@ -179,14 +248,14 @@ def decrypt_file(
                     raise ValueError("旧格式 chunk_size 非法")
                 _validate_block_layout(total_size, FILE_HEADER_V1_SIZE, block_count)
                 aad_for = _v1_file_aad
-            elif version == VERSION:
+            elif version == FILE_VERSION:
                 chunk_size = int.from_bytes(_read_exact(fin, 4, "chunk_size"), "big")
                 block_count = int.from_bytes(_read_exact(fin, 8, "block_count"), "big")
                 file_id_bytes = _read_exact(fin, 16, "file_id")
                 header_nonce = _read_exact(fin, NONCE_SIZE, "header_nonce")
                 header_tag = _read_exact(fin, TAG_SIZE, "header_tag")
                 base_header = (
-                    MAGIC + bytes([VERSION]) + chunk_size.to_bytes(4, "big")
+                    MAGIC + bytes([FILE_VERSION]) + chunk_size.to_bytes(4, "big")
                     + block_count.to_bytes(8, "big") + file_id_bytes
                 )
                 try:
@@ -337,20 +406,24 @@ def _index_v1_aad() -> bytes:
 
 
 def write_index(
-    master_key: bytes, path: str, entries: list[dict], *, vault_salt: bytes | None = None,
+    key_material: bytes | KeyContext,
+    path: str,
+    entries: list[dict],
+    *,
+    kdf_salt: bytes | None = None,
 ) -> bytes:
     validated = _validate_entries(entries, legacy=False)
     data = json.dumps(
-        {"magic": "SVLT", "version": VERSION, "entries": validated},
+        {"magic": "SVLT", "version": INDEX_VERSION, "entries": validated},
         ensure_ascii=False, separators=(",", ":"),
     ).encode("utf-8")
     if len(data) > MAX_INDEX_SIZE:
         raise ValueError("索引过大")
-    vault_salt = vault_salt or os.urandom(16)
-    vault_key = _derive_vault_key(master_key, vault_salt)
+    kdf_salt = _validate_kdf_salt(kdf_salt or os.urandom(KDF_SALT_SIZE))
+    vault_key = _derive_v3_vault_key(key_material, kdf_salt)
     base_header = (
-        MAGIC + bytes([VERSION, KDF_ID_PBKDF2_SHA256])
-        + ITERATIONS.to_bytes(4, "big") + DEFAULT_SALT + vault_salt
+        MAGIC + bytes([INDEX_VERSION, KDF_ID_PBKDF2_SHA256])
+        + ITERATIONS.to_bytes(4, "big") + kdf_salt
     )
     nonce = os.urandom(NONCE_SIZE)
     ciphertext = AESGCM(vault_key).encrypt(nonce, data, base_header + b"index")
@@ -368,10 +441,12 @@ def write_index(
         except OSError:
             pass
         raise
-    return vault_salt
+    return kdf_salt
 
 
-def _read_index_with_key(master_key: bytes, path: str) -> tuple[list[dict], bytes, int]:
+def _read_index_with_key(
+    key_material: bytes | KeyContext, path: str,
+) -> tuple[list[dict], bytes, int]:
     size = os.path.getsize(path)
     if size > MAX_INDEX_SIZE or size < INDEX_HEADER_V1_SIZE + TAG_SIZE:
         raise ValueError("索引大小非法")
@@ -382,10 +457,11 @@ def _read_index_with_key(master_key: bytes, path: str) -> tuple[list[dict], byte
         if version == LEGACY_VERSION:
             nonce = _read_exact(stream, NONCE_SIZE, "index nonce")
             ciphertext = stream.read()
-            vault_key = master_key
+            vault_key = _root_key(key_material)
             aad = _index_v1_aad()
             legacy = True
-        elif version == VERSION:
+            expected_version = LEGACY_VERSION
+        elif version == INDEX_V2_VERSION:
             kdf_id = _read_exact(stream, 1, "kdf_id")[0]
             iterations = int.from_bytes(_read_exact(stream, 4, "iterations"), "big")
             salt = _read_exact(stream, 16, "salt")
@@ -394,15 +470,34 @@ def _read_index_with_key(master_key: bytes, path: str) -> tuple[list[dict], byte
             if kdf_id != KDF_ID_PBKDF2_SHA256 or iterations != ITERATIONS or salt != DEFAULT_SALT:
                 raise ValueError("索引 KDF 参数不受支持")
             base_header = (
-                MAGIC + bytes([VERSION, kdf_id]) + iterations.to_bytes(4, "big")
+                MAGIC + bytes([INDEX_V2_VERSION, kdf_id]) + iterations.to_bytes(4, "big")
                 + salt + vault_salt
             )
-            vault_key = _derive_vault_key(master_key, vault_salt)
+            vault_key = _derive_vault_key(_root_key(key_material), vault_salt)
             ciphertext = stream.read()
             aad = base_header + b"index"
             legacy = False
+            expected_version = INDEX_V2_VERSION
+        elif version == INDEX_VERSION:
+            kdf_id = _read_exact(stream, 1, "kdf_id")[0]
+            iterations = int.from_bytes(_read_exact(stream, 4, "iterations"), "big")
+            kdf_salt = _read_exact(stream, KDF_SALT_SIZE, "kdf_salt")
+            nonce = _read_exact(stream, NONCE_SIZE, "index nonce")
+            if kdf_id != KDF_ID_PBKDF2_SHA256 or iterations != ITERATIONS:
+                raise ValueError("索引 KDF 参数不受支持")
+            base_header = (
+                MAGIC + bytes([INDEX_VERSION, kdf_id]) + iterations.to_bytes(4, "big")
+                + kdf_salt
+            )
+            vault_key = _derive_v3_vault_key(key_material, kdf_salt)
+            ciphertext = stream.read()
+            aad = base_header + b"index"
+            legacy = False
+            expected_version = INDEX_VERSION
         else:
             raise ValueError(f"不支持的索引版本：{version}")
+    if len(ciphertext) < TAG_SIZE:
+        raise ValueError("索引密文截断")
     try:
         plaintext = AESGCM(vault_key).decrypt(nonce, ciphertext, aad)
     except InvalidTag as exc:
@@ -411,15 +506,14 @@ def _read_index_with_key(master_key: bytes, path: str) -> tuple[list[dict], byte
         obj = json.loads(plaintext.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("索引 JSON 损坏") from exc
-    expected_version = LEGACY_VERSION if legacy else VERSION
     if not isinstance(obj, dict) or obj.get("magic") != "SVLT" or obj.get("version") != expected_version:
         raise ValueError("索引内容版本或 magic 非法")
     entries = _validate_entries(obj.get("entries"), legacy=legacy)
     return entries, vault_key, version
 
 
-def read_index(master_key: bytes, path: str) -> list[dict]:
-    return _read_index_with_key(master_key, path)[0]
+def read_index(key_material: bytes | KeyContext, path: str) -> list[dict]:
+    return _read_index_with_key(key_material, path)[0]
 
 
 def _is_link_or_junction(path: str) -> bool:
@@ -615,7 +709,9 @@ def _commit_directory(root: str, stage: str, operation: str, verify) -> None:
         raise
 
 
-def recover_transactions(vault_root: str, master_key: bytes | None = None) -> list[str]:
+def recover_transactions(
+    vault_root: str, key_material: bytes | KeyContext | None = None,
+) -> list[str]:
     """Recover interrupted transactions.
 
     Without a key this only performs unambiguous rollback/cleanup. With a key,
@@ -651,13 +747,13 @@ def recover_transactions(vault_root: str, master_key: bytes | None = None) -> li
                 elif root_exists and not stage_exists and not backup_exists:
                     os.remove(txn_path)
                     recovered.append(root)
-                elif root_exists and backup_exists and not stage_exists and master_key is not None:
+                elif root_exists and backup_exists and not stage_exists and key_material is not None:
                     operation = txn.get("operation")
                     if operation == "encrypt":
-                        _verify_vault_index(master_key, root)
+                        _verify_vault_index(key_material, root)
                     elif operation == "decrypt":
                         backup_index = os.path.join(backup, INDEX_FILENAME)
-                        entries = read_index(master_key, backup_index)
+                        entries = read_index(key_material, backup_index)
                         _verify_plain_tree(root, entries)
                     else:
                         continue
@@ -670,22 +766,23 @@ def recover_transactions(vault_root: str, master_key: bytes | None = None) -> li
     return recovered
 
 
-def _verify_vault_index(master_key: bytes, root: str) -> None:
-    entries, _key, _version = _read_index_with_key(master_key, os.path.join(root, INDEX_FILENAME))
+def _verify_vault_index(key_material: bytes | KeyContext, root: str) -> None:
+    entries, _key, _version = _read_index_with_key(key_material, os.path.join(root, INDEX_FILENAME))
     for entry in entries:
         if entry["type"] == "file" and not os.path.isfile(_disk_path(root, entry["enc"])):
             raise ValueError("提交后的密文文件清单不完整")
 
 
-def encrypt_folder(master_key: bytes, root_dir: str, progress=None) -> int:
+def encrypt_folder(key_material: bytes | KeyContext, root_dir: str, progress=None) -> int:
+    key_material = _as_key_context(key_material)
     root_dir = _ensure_real_directory(root_dir, "目录")
     if os.path.isfile(os.path.join(root_dir, INDEX_FILENAME)):
         raise ValueError("该目录已加密（已存在 .svault）")
     files, dirs = _scan_folder_detailed(root_dir)
     parent = os.path.dirname(root_dir)
     stage = tempfile.mkdtemp(prefix=".svault-stage-", dir=parent)
-    vault_salt = os.urandom(16)
-    vault_key = _derive_vault_key(master_key, vault_salt)
+    kdf_salt = os.urandom(KDF_SALT_SIZE)
+    vault_key = _derive_v3_vault_key(key_material, kdf_salt)
     enc_of: dict[str, str] = {}
     total = sum(item["size"] for item in files)
     done = 0
@@ -714,10 +811,10 @@ def encrypt_folder(master_key: bytes, root_dir: str, progress=None) -> int:
             done += item["size"]
             if progress:
                 progress(done, total, orig)
-        write_index(master_key, os.path.join(stage, INDEX_FILENAME), entries, vault_salt=vault_salt)
+        write_index(key_material, os.path.join(stage, INDEX_FILENAME), entries, kdf_salt=kdf_salt)
         _fsync_dir(stage)
-        _verify_vault_index(master_key, stage)
-        _commit_directory(root_dir, stage, "encrypt", lambda root: _verify_vault_index(master_key, root))
+        _verify_vault_index(key_material, stage)
+        _commit_directory(root_dir, stage, "encrypt", lambda root: _verify_vault_index(key_material, root))
         return len(files)
     except Exception:
         if os.path.isdir(stage) and os.path.realpath(stage) != os.path.realpath(root_dir):
@@ -765,12 +862,18 @@ def _verify_plain_tree(root: str, entries: list[dict]) -> None:
             raise ValueError("提交后的明文文件清单不完整")
 
 
-def decrypt_folder(master_key: bytes, root_dir: str, output_dir: str | None = None, progress=None) -> int:
+def decrypt_folder(
+    key_material: bytes | KeyContext,
+    root_dir: str,
+    output_dir: str | None = None,
+    progress=None,
+) -> int:
+    key_material = _as_key_context(key_material)
     root_dir = _ensure_real_directory(root_dir, "目录")
     index_path = os.path.join(root_dir, INDEX_FILENAME)
     if not os.path.isfile(index_path):
         raise ValueError(f"未找到索引文件 {INDEX_FILENAME}，该目录可能未加密")
-    entries, vault_key, index_version = _read_index_with_key(master_key, index_path)
+    entries, vault_key, index_version = _read_index_with_key(key_material, index_path)
     files = [entry for entry in entries if entry["type"] == "file"]
     dirs = [entry for entry in entries if entry["type"] == "dir"]
     output = os.path.abspath(output_dir) if output_dir else root_dir
@@ -789,8 +892,8 @@ def decrypt_folder(master_key: bytes, root_dir: str, output_dir: str | None = No
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             decrypt_file(
                 vault_key, _disk_path(root_dir, entry["enc"]), dst,
-                expected_file_id=entry.get("file_id") if index_version == VERSION else None,
-                expected_sha256=entry.get("sha256") if index_version == VERSION else None,
+                expected_file_id=entry.get("file_id") if index_version != LEGACY_VERSION else None,
+                expected_sha256=entry.get("sha256") if index_version != LEGACY_VERSION else None,
             )
             _restore_metadata(dst, entry)
             done += entry.get("size", 0)
@@ -812,7 +915,7 @@ def decrypt_folder(master_key: bytes, root_dir: str, output_dir: str | None = No
         raise
 
 
-def list_directory(master_key: bytes, root_dir: str, rel_path: str = "") -> list[dict]:
+def list_directory(key_material: bytes | KeyContext, root_dir: str, rel_path: str = "") -> list[dict]:
     root_dir = _ensure_real_directory(root_dir, "根目录")
     if rel_path:
         rel_path = _normalize_relpath(rel_path.replace(os.sep, "/"), legacy=False, field="path")
@@ -825,7 +928,7 @@ def list_directory(master_key: bytes, root_dir: str, rel_path: str = "") -> list
         raise ValueError("目录路径越界")
     index_path = os.path.join(abs_path, INDEX_FILENAME)
     if os.path.isfile(index_path):
-        return _build_tree_from_index(read_index(master_key, index_path))
+        return _build_tree_from_index(read_index(key_material, index_path))
     nodes: list[dict] = []
     for name in sorted(os.listdir(abs_path)):
         if name.startswith(_RESERVED_PREFIXES) or name == INDEX_FILENAME:
