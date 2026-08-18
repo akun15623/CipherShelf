@@ -90,17 +90,23 @@ def _clear_login_failures(request: Request) -> None:
         _login_failures.pop(_client_id(request), None)
 
 
-def _get_session(
+def _get_request_token(
     vault_token: str | None = Cookie(default=None, alias=COOKIE_NAME),
     authorization: str | None = Header(default=None),
-) -> dict:
+) -> str:
     # 优先从 Authorization: Bearer <token> 读会话（跨站 iframe 下 cookie 会被浏览器
     # 因 SameSite 策略拒存，改用 header 认证规避），其次回退到 cookie（向后兼容）。
     token = ""
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization[7:].strip()
+    if authorization:
+        scheme, separator, credentials = authorization.partition(" ")
+        if separator and scheme.lower() == "bearer":
+            token = credentials.strip()
     if not token:
         token = vault_token or ""
+    return token
+
+
+def _get_session(token: str = Depends(_get_request_token)) -> dict:
     now = time.monotonic()
     with _sessions_lock:
         session = _sessions.get(token)
@@ -303,10 +309,10 @@ async def unlock(body: UnlockBody, request: Request, response: Response):
 @app.post("/api/lock")
 async def lock(
     response: Response,
-    vault_token: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    token: str = Depends(_get_request_token),
 ):
     with _sessions_lock:
-        _sessions.pop(vault_token or "", None)
+        _sessions.pop(token, None)
     response.delete_cookie(COOKIE_NAME, path="/api", secure=COOKIE_SECURE, samesite="strict")
     return {"ok": True}
 

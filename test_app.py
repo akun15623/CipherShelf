@@ -44,6 +44,7 @@ class AppTests(unittest.TestCase):
             json={"password": PASSWORD, "password_confirmation": PASSWORD},
         )
         self.assertEqual(response.status_code, 200, response.text)
+        return response
 
     def wait_task(self, task_id, client=None):
         client = client or self.client
@@ -87,6 +88,19 @@ class AppTests(unittest.TestCase):
                 json={"paths": ["vault"], "output": output},
             )
             self.assertIn(response.status_code, (400, 403), response.text)
+
+    def test_bearer_session_is_invalidated_by_lock_without_cookie(self):
+        response = self.unlock()
+        token = response.json()["token"]
+        self.client.cookies.clear()
+        bearer = {"Authorization": f"Bearer {token}"}
+
+        self.assertEqual(self.client.get("/api/tree?path=", headers=bearer).status_code, 200)
+        response = self.client.post("/api/lock", headers={**HEADERS, **bearer})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.client.get("/api/tree?path=", headers=bearer).status_code, 401)
+        with app._sessions_lock:
+            self.assertNotIn(token, app._sessions)
 
     def test_only_task_owner_can_read_and_mutations_are_serialized(self):
         for name in ("one", "two"):
