@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .env
+.tmp-test-deps/
 
 # 飞牛 Native 打包：app/server/ 由 fnos/native/build.sh 从根目录生成，.fpk 为构建产物
 fnos/native/secure-vault/app/server/

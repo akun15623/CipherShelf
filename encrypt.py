@@ -26,7 +26,6 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="secure-vault 文件夹加密工具")
     ap.add_argument("path", help="要加密的文件夹路径")
     ap.add_argument("--password", default=None, help="密码（不推荐，会留 shell 历史；缺省交互输入）")
-    ap.add_argument("--iterations", type=int, default=crypto.ITERATIONS, help=f"PBKDF2 迭代次数（默认 {crypto.ITERATIONS}）")
     ap.add_argument("--yes", action="store_true", help="跳过确认提示")
     args = ap.parse_args()
 
@@ -45,10 +44,11 @@ def main() -> int:
         if password != confirm:
             print("✗ 两次密码不一致", file=sys.stderr)
             return 2
-    if len(password) < 8:
-        print("⚠️  密码不足 8 位，仍继续（建议使用更强密码）", file=sys.stderr)
+    if len(password) < 12:
+        print("✗ 密码至少 12 位", file=sys.stderr)
+        return 2
 
-    key = crypto.derive_master_key(password, iterations=args.iterations)
+    key = crypto.derive_master_key(password)
     password = None  # 用完即弃
 
     # 操作摘要

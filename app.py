@@ -1,11 +1,4 @@
-"""
-secure-vault Web 服务（FastAPI，v2：文件夹就地加解密工具）
-
-- 进入输密码 -> 派生主密钥存内存会话（锁定即清除）
-- 目录树懒加载（已加密目录显示原文件名）
-- 加密/解密选中的目录（后台任务 + 进度轮询）
-- 密码不落盘、不进日志
-"""
+"""Secure Vault FastAPI service with bounded sessions and serialized mutations."""
 
 from __future__ import annotations
 
@@ -14,68 +7,209 @@ import secrets
 import threading
 import time
 import uuid
+from collections import defaultdict, deque
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Depends, HTTPException, Request, Response, Cookie, Header
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pathlib import Path
+from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 import crypto
 
-VAULT_ROOT = os.environ.get("VAULT_ROOT", "/data")
+VAULT_ROOT = os.path.realpath(os.environ.get("VAULT_ROOT", "/data"))
 PORT = int(os.environ.get("PORT", "8080"))
-# 可选：环境变量预设初始密码。设了则解锁时直接比对（不再走「创建密码」流程）。
 PRESET_PASSWORD = os.environ.get("VAULT_PASSWORD") or None
-# 未配置授权目录时为 True（应用用占位目录启动，前端引导用户去配置）
 VAULT_UNCONFIGURED = os.environ.get("VAULT_UNCONFIGURED") == "1"
+COOKIE_SECURE = os.environ.get("SVAULT_COOKIE_SECURE", "0") == "1"
+
+COOKIE_NAME = "svault_token"
+MIN_PASSWORD_LEN = 12
+SESSION_IDLE_SECONDS = 30 * 60
+SESSION_MAX_SECONDS = 8 * 60 * 60
+MAX_TASKS = 100
+MAX_PATHS_PER_REQUEST = 32
+LOGIN_WINDOW_SECONDS = 5 * 60
+LOGIN_MAX_FAILURES = 10
+STATUS_CACHE_SECONDS = 60
 
 app = FastAPI(title="Secure Vault", docs_url=None, redoc_url=None, openapi_url=None)
 
-# 内存会话：token -> {key: master_key, init: 创建会话时工作区是否已初始化}
 _sessions: dict[str, dict] = {}
-COOKIE_NAME = "svault_token"
-MIN_PASSWORD_LEN = 8
-
-# 后台任务：task_id -> {status, percent, done, total, current, error}
+_sessions_lock = threading.Lock()
 _tasks: dict[str, dict] = {}
 _tasks_lock = threading.Lock()
+_mutation_lock = threading.Lock()
+_login_failures: dict[str, deque[float]] = defaultdict(deque)
+_login_lock = threading.Lock()
+_status_lock = threading.Lock()
+_status_cache = {"at": 0.0, "initialized": False}
 
 
-# ---------------------------------------------------------------------------
-# 会话辅助
-# ---------------------------------------------------------------------------
-def _get_key(vault_token: str | None = Cookie(default=None, alias=COOKIE_NAME)) -> bytes:
+class UnlockBody(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    password: StrictStr = Field(min_length=1, max_length=1024)
+    password_confirmation: StrictStr | None = Field(default=None, max_length=1024)
+
+
+class PathsBody(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    paths: list[StrictStr] = Field(min_length=1, max_length=MAX_PATHS_PER_REQUEST)
+
+
+class DecryptBody(PathsBody):
+    output: StrictStr | None = Field(default=None, max_length=4096)
+
+
+def _client_id(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _prune_login_failures(client: str, now: float) -> deque[float]:
+    failures = _login_failures[client]
+    while failures and now - failures[0] > LOGIN_WINDOW_SECONDS:
+        failures.popleft()
+    return failures
+
+
+def _check_login_rate(request: Request) -> None:
+    now = time.monotonic()
+    with _login_lock:
+        if len(_prune_login_failures(_client_id(request), now)) >= LOGIN_MAX_FAILURES:
+            raise HTTPException(status_code=429, detail="登录尝试过多，请稍后再试")
+
+
+def _record_login_failure(request: Request) -> None:
+    with _login_lock:
+        _prune_login_failures(_client_id(request), time.monotonic()).append(time.monotonic())
+
+
+def _clear_login_failures(request: Request) -> None:
+    with _login_lock:
+        _login_failures.pop(_client_id(request), None)
+
+
+def _get_session(
+    vault_token: str | None = Cookie(default=None, alias=COOKIE_NAME),
+) -> dict:
     token = vault_token or ""
-    sess = _sessions.get(token)
-    if not sess:
-        raise HTTPException(status_code=401, detail="未解锁")
-    return sess["key"]
+    now = time.monotonic()
+    with _sessions_lock:
+        session = _sessions.get(token)
+        if not session:
+            raise HTTPException(status_code=401, detail="未解锁")
+        if now - session["last"] > SESSION_IDLE_SECONDS or now - session["created"] > SESSION_MAX_SECONDS:
+            _sessions.pop(token, None)
+            raise HTTPException(status_code=401, detail="会话已过期")
+        session["last"] = now
+        return {"token": token, "key": session["key"], "init": session["init"]}
 
 
 def _check_password_strength(password: str) -> str | None:
-    """返回强度错误信息，None 表示合格。"""
     if len(password) < MIN_PASSWORD_LEN:
         return f"密码至少 {MIN_PASSWORD_LEN} 位"
     return None
 
 
-def _safe_path(rel: str) -> str:
-    """把相对路径解析到 VAULT_ROOT 内，越界则拒绝。"""
-    root = os.path.abspath(VAULT_ROOT)
-    target = os.path.abspath(os.path.join(root, rel)) if rel else root
-    if target != root and not target.startswith(root + os.sep):
+def _is_link_or_junction(path: str) -> bool:
+    return os.path.islink(path) or bool(getattr(os.path, "isjunction", lambda _p: False)(path))
+
+
+def _safe_path(
+    rel: str,
+    *,
+    allow_root: bool = True,
+    must_exist: bool = True,
+) -> str:
+    """Resolve a POSIX-style API path under VAULT_ROOT without following links."""
+    if not isinstance(rel, str) or len(rel) > 4096 or "\x00" in rel or "\\" in rel:
+        raise HTTPException(status_code=400, detail="路径格式非法")
+    if rel:
+        pure = PurePosixPath(rel)
+        if pure.is_absolute() or any(part in ("", ".", "..") for part in rel.split("/")):
+            raise HTTPException(status_code=403, detail="路径越界")
+        parts = rel.split("/")
+    else:
+        parts = []
+    if not allow_root and not parts:
+        raise HTTPException(status_code=400, detail="不能直接操作数据根目录")
+
+    root = VAULT_ROOT
+    target = os.path.abspath(os.path.join(root, *parts))
+    try:
+        if os.path.commonpath([root, target]) != root:
+            raise HTTPException(status_code=403, detail="路径越界")
+    except ValueError:
+        raise HTTPException(status_code=403, detail="路径越界")
+
+    current = root
+    if _is_link_or_junction(current):
+        raise HTTPException(status_code=403, detail="数据根目录不能是符号链接")
+    for index, part in enumerate(parts):
+        current = os.path.join(current, part)
+        if os.path.lexists(current):
+            if _is_link_or_junction(current):
+                raise HTTPException(status_code=403, detail="路径包含符号链接或联接点")
+        elif index < len(parts) - 1 and must_exist:
+            raise HTTPException(status_code=404, detail="路径不存在")
+    if must_exist and not os.path.exists(target):
+        raise HTTPException(status_code=404, detail="路径不存在")
+    existing = target
+    while not os.path.exists(existing):
+        parent = os.path.dirname(existing)
+        if parent == existing:
+            break
+        existing = parent
+    try:
+        if os.path.commonpath([root, os.path.realpath(existing)]) != root:
+            raise HTTPException(status_code=403, detail="路径越界")
+    except ValueError:
         raise HTTPException(status_code=403, detail="路径越界")
     return target
 
 
+def _validate_non_overlapping(paths: list[str]) -> None:
+    normalized = sorted(set(paths), key=lambda value: (len(Path(value).parts), value))
+    if len(normalized) != len(paths):
+        raise HTTPException(status_code=400, detail="路径重复")
+    for index, path in enumerate(normalized):
+        for other in normalized[index + 1:]:
+            try:
+                if os.path.commonpath([path, other]) == path:
+                    raise HTTPException(status_code=400, detail="所选路径不能互为父子目录")
+            except ValueError:
+                continue
+
+
+def _same_origin(request: Request) -> bool:
+    origin = request.headers.get("origin")
+    if not origin:
+        return True
+    try:
+        return urlsplit(origin).netloc == request.headers.get("host", "")
+    except ValueError:
+        return False
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    if request.url.path.startswith("/api/") and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        if request.headers.get("x-svault-request") != "1" or not _same_origin(request):
+            return JSONResponse(status_code=403, content={"detail": "拒绝跨站请求"})
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Cache-Control", "no-store")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    return response
+
+
 @app.exception_handler(Exception)
-async def _unhandled(request: Request, exc: Exception):
+async def _unhandled(_request: Request, _exc: Exception):
     return JSONResponse(status_code=500, content={"detail": "服务器内部错误"})
 
 
-# ---------------------------------------------------------------------------
-# 静态资源（前端）
-# ---------------------------------------------------------------------------
 _static_dir = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
@@ -85,197 +219,218 @@ async def index():
     return Response(content=(_static_dir / "index.html").read_bytes(), media_type="text/html")
 
 
-# ---------------------------------------------------------------------------
-# 会话
-# ---------------------------------------------------------------------------
 @app.get("/api/status")
 async def status():
-    """报告工作区状态（无需会话）。preset=true 表示环境变量预设了密码，前端显示单密码框。"""
+    now = time.monotonic()
+    with _status_lock:
+        if now - _status_cache["at"] > STATUS_CACHE_SECONDS:
+            if os.path.isdir(VAULT_ROOT):
+                crypto.recover_transactions(VAULT_ROOT)
+                _status_cache["initialized"] = crypto.is_initialized(VAULT_ROOT)
+            else:
+                _status_cache["initialized"] = False
+            _status_cache["at"] = now
+        initialized = _status_cache["initialized"]
     return {
-        "initialized": crypto.is_initialized(VAULT_ROOT),
+        "initialized": initialized,
         "preset": PRESET_PASSWORD is not None,
         "configured": not VAULT_UNCONFIGURED,
     }
 
 
 @app.post("/api/unlock")
-async def unlock(body: dict, response: Response):
+async def unlock(body: UnlockBody, request: Request, response: Response):
     if VAULT_UNCONFIGURED:
         raise HTTPException(status_code=400, detail="请先在应用设置里配置数据目录")
-    password = body.get("password", "")
-    if not password:
-        raise HTTPException(status_code=400, detail="密码不能为空")
-    confirmation = body.get("password_confirmation", "")
-
-    initialized = crypto.is_initialized(VAULT_ROOT)
-
-    if PRESET_PASSWORD is not None:
-        # 预设密码模式：直接比对输入密码（常数时间比较，防时序攻击）
-        if not secrets.compare_digest(password.encode("utf-8"), PRESET_PASSWORD.encode("utf-8")):
-            raise HTTPException(status_code=401, detail="密码错误或索引损坏")
-        key = crypto.derive_master_key(password)
-        password = None
-        # 若已有索引，验证预设密码能解开（预设密码被改过则提前拒绝，统一提示）
-        for index_path in crypto.find_encrypted_roots(VAULT_ROOT):
-            try:
+    if _mutation_lock.locked():
+        raise HTTPException(status_code=409, detail="磁盘任务正在运行，请稍后重试")
+    _check_login_rate(request)
+    password = body.password
+    initialized = False
+    try:
+        if PRESET_PASSWORD is not None:
+            if not secrets.compare_digest(password.encode("utf-8"), PRESET_PASSWORD.encode("utf-8")):
+                raise ValueError("密码错误或索引损坏")
+            key = crypto.derive_master_key(password)
+            index_paths = crypto.find_encrypted_roots(VAULT_ROOT)
+            for index_path in index_paths:
                 crypto.read_index(key, index_path)
-            except ValueError:
-                raise HTTPException(status_code=401, detail="密码错误或索引损坏")
-        # 预设密码 = 密码已确定，标记为已初始化语义，避免首次加密时被误判为「未初始化会话」而失效
-        initialized = True
-    elif initialized:
-        # 已初始化：单密码，派生后验证所有索引，任一失败即拒（统一提示，不泄露细节）
-        key = crypto.derive_master_key(password)
-        password = None
-        for index_path in crypto.find_encrypted_roots(VAULT_ROOT):
-            try:
+            initialized = True
+        else:
+            index_paths = crypto.find_encrypted_roots(VAULT_ROOT)
+            initialized = bool(index_paths)
+        if PRESET_PASSWORD is None and initialized:
+            key = crypto.derive_master_key(password)
+            for index_path in index_paths:
                 crypto.read_index(key, index_path)
-            except ValueError:
-                raise HTTPException(status_code=401, detail="密码错误或索引损坏")
-    else:
-        # 未初始化：创建密码，要求两次一致 + 满足强度；密钥只派生到内存会话，
-        # 第一次成功加密并提交 .svault 时才正式建立。
-        if confirmation != password:
-            raise HTTPException(status_code=400, detail="两次输入的密码不一致")
-        msg = _check_password_strength(password)
-        if msg:
-            raise HTTPException(status_code=400, detail=msg)
-        key = crypto.derive_master_key(password)
-        password = None
+        elif PRESET_PASSWORD is None:
+            if body.password_confirmation != password:
+                raise HTTPException(status_code=400, detail="两次输入的密码不一致")
+            message = _check_password_strength(password)
+            if message:
+                raise HTTPException(status_code=400, detail=message)
+            key = crypto.derive_master_key(password)
+    except HTTPException:
+        _record_login_failure(request)
+        raise
+    except (ValueError, OSError):
+        _record_login_failure(request)
+        raise HTTPException(status_code=401, detail="密码错误或索引损坏")
 
+    _clear_login_failures(request)
+    # Authenticated cleanup for a commit that reached the new tree but crashed
+    # before deleting its backup. This never removes a backup before verifying
+    # the committed encrypted/plaintext tree with the supplied key.
+    crypto.recover_transactions(VAULT_ROOT, key)
     token = secrets.token_urlsafe(32)
-    _sessions[token] = {"key": key, "init": initialized}
-    response.set_cookie(COOKIE_NAME, token, httponly=True, samesite="strict", max_age=86400)
+    now = time.monotonic()
+    with _sessions_lock:
+        _sessions[token] = {"key": key, "init": initialized, "created": now, "last": now}
+    response.set_cookie(
+        COOKIE_NAME, token, httponly=True, secure=COOKIE_SECURE, samesite="strict",
+        max_age=SESSION_MAX_SECONDS, path="/api",
+    )
     return {"ok": True, "initialized": initialized}
 
 
 @app.post("/api/lock")
-async def lock(vault_token: str | None = Cookie(default=None, alias=COOKIE_NAME)):
-    token = vault_token or ""
-    _sessions.pop(token, None)
+async def lock(
+    response: Response,
+    vault_token: str | None = Cookie(default=None, alias=COOKIE_NAME),
+):
+    with _sessions_lock:
+        _sessions.pop(vault_token or "", None)
+    response.delete_cookie(COOKIE_NAME, path="/api", secure=COOKIE_SECURE, samesite="strict")
     return {"ok": True}
 
 
-# ---------------------------------------------------------------------------
-# 目录树
-# ---------------------------------------------------------------------------
 @app.get("/api/tree")
-async def tree(path: str = "", key: bytes = Depends(_get_key)):
-    abs_path = _safe_path(path)
+async def tree(path: str = "", session: dict = Depends(_get_session)):
+    _safe_path(path, allow_root=True, must_exist=True)
     try:
-        nodes = crypto.list_directory(key, VAULT_ROOT, path)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        nodes = crypto.list_directory(session["key"], VAULT_ROOT, path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc).replace(VAULT_ROOT, "<VAULT_ROOT>"))
     return {"path": path, "nodes": nodes}
 
 
-# ---------------------------------------------------------------------------
-# 任务调度
-# ---------------------------------------------------------------------------
-def _run_task(task_id: str, fn, *args):
+def _cleanup_tasks(now: float) -> None:
+    stale = [task_id for task_id, task in _tasks.items() if now - task["created"] > 3600 and task["status"] != "running"]
+    for task_id in stale:
+        _tasks.pop(task_id, None)
+
+
+def _new_task(owner: str) -> str:
+    with _tasks_lock:
+        _cleanup_tasks(time.monotonic())
+        if len(_tasks) >= MAX_TASKS:
+            raise HTTPException(status_code=503, detail="任务过多，请稍后重试")
+        task_id = uuid.uuid4().hex
+        _tasks[task_id] = {
+            "owner": owner, "created": time.monotonic(), "status": "running",
+            "percent": 0.0, "done": 0, "total": 0, "current": "", "error": None,
+        }
+        return task_id
+
+
+def _run_task(task_id: str, function) -> None:
     def runner():
         try:
-            fn(*args)
+            function()
             with _tasks_lock:
                 _tasks[task_id]["status"] = "done"
                 _tasks[task_id]["percent"] = 100.0
-        except Exception as e:
+        except Exception as exc:
+            message = str(exc).replace(VAULT_ROOT, "<VAULT_ROOT>")
             with _tasks_lock:
                 _tasks[task_id]["status"] = "error"
-                _tasks[task_id]["error"] = str(e)
-
-    threading.Thread(target=runner, daemon=True).start()
-
-
-def _new_task() -> str:
-    task_id = uuid.uuid4().hex
-    _tasks[task_id] = {
-        "status": "running", "percent": 0.0, "done": 0, "total": 0,
-        "current": "", "error": None,
-    }
-    return task_id
-
-
-def _invalidate_stale_init_sessions(current_token: str) -> None:
-    """首次加密建立 .svault 后，失效其它尚未初始化的旧会话。
-
-    避免两个并发会话用不同密码建立数据（DESIGN §3.3 首次使用第 4 点）。
-    """
-    if not crypto.is_initialized(VAULT_ROOT):
-        return
-    for tok in list(_sessions.keys()):
-        if tok != current_token and _sessions[tok].get("init") is False:
-            _sessions.pop(tok, None)
+                _tasks[task_id]["error"] = message[:1000]
+        finally:
+            with _status_lock:
+                _status_cache["at"] = 0.0
+            _mutation_lock.release()
+    threading.Thread(target=runner, name=f"svault-{task_id[:8]}", daemon=True).start()
 
 
 def _progress_cb(task_id: str):
-    def cb(done: int, total: int, current: str):
+    def callback(done: int, total: int, current: str):
         with _tasks_lock:
-            t = _tasks[task_id]
-            t["done"] = done
-            t["total"] = total
-            t["percent"] = (done / total * 100.0) if total else 100.0
-            t["current"] = current
-    return cb
+            task = _tasks[task_id]
+            task["done"] = done
+            task["total"] = total
+            task["percent"] = (done / total * 100.0) if total else 100.0
+            task["current"] = current
+    return callback
 
 
-# ---------------------------------------------------------------------------
-# 加密 / 解密
-# ---------------------------------------------------------------------------
+def _invalidate_stale_init_sessions(current_token: str) -> None:
+    if not crypto.is_initialized(VAULT_ROOT):
+        return
+    with _sessions_lock:
+        for token in list(_sessions):
+            if token != current_token and _sessions[token].get("init") is False:
+                _sessions.pop(token, None)
+
+
 @app.post("/api/encrypt")
-async def encrypt(
-    body: dict,
-    key: bytes = Depends(_get_key),
-    vault_token: str | None = Cookie(default=None, alias=COOKIE_NAME),
-):
-    paths = body.get("paths") or []
-    if not paths:
-        raise HTTPException(status_code=400, detail="未选择目录")
-    abs_paths = [_safe_path(p) for p in paths]
-
-    task_id = _new_task()
-    cb = _progress_cb(task_id)
-    token = vault_token or ""
-
-    def work():
-        for p in abs_paths:
-            crypto.encrypt_folder(key, p, progress=cb)
-        _invalidate_stale_init_sessions(token)
-
-    _run_task(task_id, work)
-    return {"task_id": task_id}
+async def encrypt(body: PathsBody, session: dict = Depends(_get_session)):
+    abs_paths = [_safe_path(path, allow_root=False, must_exist=True) for path in body.paths]
+    _validate_non_overlapping(abs_paths)
+    if not _mutation_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="已有磁盘任务正在运行")
+    try:
+        task_id = _new_task(session["token"])
+        callback = _progress_cb(task_id)
+        def work():
+            for path in abs_paths:
+                crypto.encrypt_folder(session["key"], path, progress=callback)
+            _invalidate_stale_init_sessions(session["token"])
+        _run_task(task_id, work)
+        return {"task_id": task_id}
+    except Exception:
+        _mutation_lock.release()
+        raise
 
 
 @app.post("/api/decrypt")
-async def decrypt(body: dict, key: bytes = Depends(_get_key)):
-    paths = body.get("paths") or []
-    output = body.get("output") or None
-    if not paths:
-        raise HTTPException(status_code=400, detail="未选择目录")
-    abs_paths = [_safe_path(p) for p in paths]
-
-    task_id = _new_task()
-    cb = _progress_cb(task_id)
-
-    def work():
-        for p in abs_paths:
-            crypto.decrypt_folder(key, p, output_dir=output, progress=cb)
-
-    _run_task(task_id, work)
-    return {"task_id": task_id}
+async def decrypt(body: DecryptBody, session: dict = Depends(_get_session)):
+    abs_paths = [_safe_path(path, allow_root=False, must_exist=True) for path in body.paths]
+    _validate_non_overlapping(abs_paths)
+    output = None
+    if body.output is not None:
+        if len(abs_paths) != 1:
+            raise HTTPException(status_code=400, detail="指定 output 时只能解密一个目录")
+        output = _safe_path(body.output, allow_root=False, must_exist=False)
+        for source in abs_paths:
+            try:
+                common = os.path.commonpath([source, output])
+            except ValueError:
+                common = ""
+            if common in (source, output):
+                raise HTTPException(status_code=400, detail="输出目录不能与源目录重叠")
+    if not _mutation_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="已有磁盘任务正在运行")
+    try:
+        task_id = _new_task(session["token"])
+        callback = _progress_cb(task_id)
+        def work():
+            for path in abs_paths:
+                crypto.decrypt_folder(session["key"], path, output_dir=output, progress=callback)
+        _run_task(task_id, work)
+        return {"task_id": task_id}
+    except Exception:
+        _mutation_lock.release()
+        raise
 
 
 @app.get("/api/progress/{task_id}")
-async def progress(task_id: str, key: bytes = Depends(_get_key)):
+async def progress(task_id: str, session: dict = Depends(_get_session)):
     with _tasks_lock:
-        t = _tasks.get(task_id)
-    if not t:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    return {
-        "status": t["status"],
-        "percent": round(t["percent"], 1),
-        "done": t["done"],
-        "total": t["total"],
-        "current": t["current"],
-        "error": t["error"],
-    }
+        task = _tasks.get(task_id)
+        if not task or not secrets.compare_digest(task["owner"], session["token"]):
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return {
+            "status": task["status"], "percent": round(task["percent"], 1),
+            "done": task["done"], "total": task["total"], "current": task["current"],
+            "error": task["error"],
+        }

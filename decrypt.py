@@ -26,7 +26,6 @@ def main() -> int:
     ap.add_argument("path", help="已加密的文件夹路径（含 .svault）")
     ap.add_argument("-o", "--output", default=None, help="还原输出目录（缺省就地还原）")
     ap.add_argument("--password", default=None, help="密码（不推荐，会留 shell 历史；缺省交互输入）")
-    ap.add_argument("--iterations", type=int, default=crypto.ITERATIONS, help=f"PBKDF2 迭代次数（默认 {crypto.ITERATIONS}）")
     ap.add_argument("--yes", action="store_true", help="跳过确认提示")
     args = ap.parse_args()
 
@@ -45,7 +44,7 @@ def main() -> int:
         print("✗ 密码不能为空", file=sys.stderr)
         return 2
 
-    key = crypto.derive_master_key(password, iterations=args.iterations)
+    key = crypto.derive_master_key(password)
     password = None  # 用完即弃
 
     # 先验证密码（读索引）

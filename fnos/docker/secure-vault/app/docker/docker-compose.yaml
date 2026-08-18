@@ -1,6 +1,6 @@
 services:
   secure-vault:
-    image: crpi-dberwpbq5bud3kxp.cn-chengdu.personal.cr.aliyuncs.com/akun15623/secure-vault:latest
+    image: crpi-dberwpbq5bud3kxp.cn-chengdu.personal.cr.aliyuncs.com/akun15623/secure-vault:1.1.0
     container_name: secure-vault
     restart: unless-stopped
     ports:
@@ -9,5 +9,13 @@ services:
       VAULT_ROOT: /data
       PORT: "8080"
       VAULT_PASSWORD: "${wizard_password}"
+      SVAULT_COOKIE_SECURE: "0"
     volumes:
       - "${wizard_data_path}:/data"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

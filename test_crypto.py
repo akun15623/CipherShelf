@@ -1,238 +1,262 @@
+import json
 import os
 import shutil
-import sys
 import tempfile
+import unittest
+import uuid
+from unittest.mock import patch
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 import crypto
-from crypto import (
-    derive_master_key, encrypt_file, decrypt_file,
-    write_index, read_index, encrypt_folder, decrypt_folder,
-    list_directory, _build_tree_from_index,
-)
 
-PWD = "test-password-123"
-KEY = derive_master_key(PWD)
+PASSWORD = "test-password-123"
+KEY = crypto.derive_master_key(PASSWORD)
 
 
-def _mktree(base):
-    """造一个带中文名、空目录、深层嵌套、空文件的测试目录树。"""
-    os.makedirs(os.path.join(base, "2024"), exist_ok=True)
+def make_tree(base):
     os.makedirs(os.path.join(base, "2024", "旅行"), exist_ok=True)
     os.makedirs(os.path.join(base, "2025"), exist_ok=True)
     os.makedirs(os.path.join(base, "空目录"), exist_ok=True)
-    with open(os.path.join(base, "2024", "旅行", "照片.jpg"), "wb") as f:
-        f.write(os.urandom(10000))
-    with open(os.path.join(base, "2024", "全家福.jpg"), "wb") as f:
-        f.write("hello 全家福".encode("utf-8") * 100)
-    with open(os.path.join(base, "2025", "视频.bin"), "wb") as f:
-        f.write(os.urandom(2 * 1024 * 1024 + 12345))  # 跨块
-    with open(os.path.join(base, "空文件.txt"), "wb") as f:
-        f.write(b"")  # 空文件
-    with open(os.path.join(base, "根文件.txt"), "wb") as f:
-        f.write("根目录文件".encode("utf-8"))
+    with open(os.path.join(base, "2024", "旅行", "照片.jpg"), "wb") as stream:
+        stream.write(os.urandom(10_000))
+    with open(os.path.join(base, "2024", "全家福.jpg"), "wb") as stream:
+        stream.write("hello 全家福".encode() * 100)
+    with open(os.path.join(base, "2025", "视频.bin"), "wb") as stream:
+        stream.write(os.urandom(2 * 1024 * 1024 + 12_345))
+    open(os.path.join(base, "空文件.txt"), "wb").close()
+    with open(os.path.join(base, "根文件.txt"), "wb") as stream:
+        stream.write("根目录文件".encode())
 
 
-def test_roundtrip_file():
-    tmp = tempfile.mkdtemp()
-    src = os.path.join(tmp, "src.bin")
-    enc = os.path.join(tmp, "src.enc")
-    dec = os.path.join(tmp, "src.dec")
-    data = os.urandom(3 * 1024 * 1024 + 7)
-    with open(src, "wb") as f:
-        f.write(data)
-    encrypt_file(KEY, src, enc)
-    decrypt_file(KEY, enc, dec)
-    with open(dec, "rb") as f:
-        assert f.read() == data
-    shutil.rmtree(tmp)
-    print("✓ 文件加解密回环（含跨块大文件）")
+def write_raw_v2_index(path, entries):
+    vault_salt = os.urandom(16)
+    vault_key = crypto._derive_vault_key(KEY, vault_salt)
+    base = (
+        crypto.MAGIC
+        + bytes([crypto.VERSION, crypto.KDF_ID_PBKDF2_SHA256])
+        + crypto.ITERATIONS.to_bytes(4, "big")
+        + crypto.DEFAULT_SALT
+        + vault_salt
+    )
+    nonce = os.urandom(crypto.NONCE_SIZE)
+    data = json.dumps({"magic": "SVLT", "version": crypto.VERSION, "entries": entries}).encode()
+    ciphertext = AESGCM(vault_key).encrypt(nonce, data, base + b"index")
+    with open(path, "wb") as stream:
+        stream.write(base + nonce + ciphertext)
 
 
-def test_wrong_password():
-    tmp = tempfile.mkdtemp()
-    src = os.path.join(tmp, "a.bin")
-    enc = os.path.join(tmp, "a.enc")
-    with open(src, "wb") as f:
-        f.write(b"secret")
-    encrypt_file(KEY, src, enc)
-    wrong = derive_master_key("wrong-password")
-    try:
-        decrypt_file(wrong, enc, os.path.join(tmp, "dec"))
-        raise AssertionError("错误密码应抛异常")
-    except Exception:
-        pass
-    shutil.rmtree(tmp)
-    print("✓ 错误密码解密被拒")
+def write_v1_file(src, dst):
+    size = os.path.getsize(src)
+    count = (size + crypto.BLOCK_SIZE - 1) // crypto.BLOCK_SIZE
+    aes = AESGCM(KEY)
+    with open(src, "rb") as fin, open(dst, "wb") as fout:
+        fout.write(crypto.MAGIC + bytes([crypto.LEGACY_VERSION]))
+        fout.write(crypto.BLOCK_SIZE.to_bytes(4, "big"))
+        fout.write(count.to_bytes(4, "big"))
+        for index in range(count):
+            block = fin.read(crypto.BLOCK_SIZE)
+            nonce = os.urandom(crypto.NONCE_SIZE)
+            fout.write(nonce)
+            fout.write(aes.encrypt(nonce, block, crypto._v1_file_aad(index)))
 
 
-def test_tamper_detection():
-    tmp = tempfile.mkdtemp()
-    src = os.path.join(tmp, "a.bin")
-    enc = os.path.join(tmp, "a.enc")
-    data = os.urandom(1024 * 1024 + 100)
-    with open(src, "wb") as f:
-        f.write(data)
-    encrypt_file(KEY, src, enc)
-    # 翻转密文第 20 字节（在数据块内）
-    with open(enc, "r+b") as f:
-        f.seek(20)
-        b = f.read(1)
-        f.seek(20)
-        f.write(bytes([b[0] ^ 0x01]))
-    try:
-        decrypt_file(KEY, enc, os.path.join(tmp, "dec"))
-        raise AssertionError("篡改应抛认证失败")
-    except Exception:
-        pass
-    shutil.rmtree(tmp)
-    print("✓ 篡改检测（翻转 1 bit 报错）")
+def write_v1_index(path, entries):
+    nonce = os.urandom(crypto.NONCE_SIZE)
+    data = json.dumps({"magic": "SVLT", "version": 1, "entries": entries}).encode()
+    ciphertext = AESGCM(KEY).encrypt(nonce, data, crypto._index_v1_aad())
+    with open(path, "wb") as stream:
+        stream.write(crypto.MAGIC + b"\x01" + nonce + ciphertext)
 
 
-def test_folder_roundtrip():
-    tmp = tempfile.mkdtemp()
-    src_dir = os.path.join(tmp, "照片")
-    _mktree(src_dir)
+class CryptoTests(unittest.TestCase):
+    def test_kdf_vector_and_parameters_are_frozen(self):
+        key = crypto.derive_master_key("secure-vault-test-password")
+        self.assertEqual(key.hex(), "737d703b7454ea13eb5f9de1972bf9e6d154001e0415c1a04526a8490adeab06")
+        with self.assertRaises(ValueError):
+            crypto.derive_master_key("secure-vault-test-password", iterations=1)
 
-    # 加密
-    n = encrypt_folder(KEY, src_dir)
-    assert n == 5, f"应加密 5 个文件，实际 {n}"
+    def test_file_roundtrip_and_wrong_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src, enc, dec = (os.path.join(tmp, name) for name in ("src", "enc", "dec"))
+            data = os.urandom(3 * 1024 * 1024 + 7)
+            with open(src, "wb") as stream:
+                stream.write(data)
+            file_id, digest = crypto.encrypt_file(KEY, src, enc)
+            crypto.decrypt_file(KEY, enc, dec, expected_file_id=file_id, expected_sha256=digest)
+            with open(dec, "rb") as stream:
+                self.assertEqual(stream.read(), data)
+            os.remove(dec)
+            with self.assertRaises(ValueError):
+                crypto.decrypt_file(crypto.derive_master_key("wrong-password"), enc, dec)
 
-    # 加密后：.svault 存在，无明文文件，密文是乱码名
-    assert os.path.isfile(os.path.join(src_dir, ".svault"))
-    for root, _dirs, files in os.walk(src_dir):
-        for fn in files:
-            if fn == ".svault":
-                continue
-            # 密文文件名应为 32 位 hex，且无 .jpg/.txt 扩展名
-            assert len(fn) == 32, f"密文名长度异常：{fn}"
-            assert "." not in fn, f"密文名不应有扩展名：{fn}"
-    # 明文已删
-    assert not os.path.exists(os.path.join(src_dir, "2024", "旅行", "照片.jpg"))
+    def test_authenticated_header_and_ciphertext_tamper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src, enc, out = (os.path.join(tmp, name) for name in ("src", "enc", "out"))
+            with open(src, "wb") as stream:
+                stream.write(os.urandom(1024))
+            crypto.encrypt_file(KEY, src, enc)
+            with open(enc, "r+b") as stream:
+                stream.seek(9)
+                stream.write((0).to_bytes(8, "big"))
+            with self.assertRaises(ValueError):
+                crypto.decrypt_file(KEY, enc, out)
+            self.assertFalse(os.path.exists(out))
 
-    # 解密（原地）
-    n2 = decrypt_folder(KEY, src_dir)
-    assert n2 == 5
+            os.remove(enc)
+            crypto.encrypt_file(KEY, src, enc)
+            with open(enc, "r+b") as stream:
+                stream.seek(crypto.FILE_HEADER_V2_SIZE + crypto.NONCE_SIZE + 3)
+                value = stream.read(1)
+                stream.seek(-1, os.SEEK_CUR)
+                stream.write(bytes([value[0] ^ 1]))
+            with self.assertRaises(ValueError):
+                crypto.decrypt_file(KEY, enc, out)
 
-    # 解密后还原
-    assert os.path.exists(os.path.join(src_dir, "2024", "旅行", "照片.jpg"))
-    assert os.path.exists(os.path.join(src_dir, "2024", "全家福.jpg"))
-    assert os.path.exists(os.path.join(src_dir, "2025", "视频.bin"))
-    assert os.path.exists(os.path.join(src_dir, "空目录"))
-    assert os.path.exists(os.path.join(src_dir, "空文件.txt"))
-    with open(os.path.join(src_dir, "根文件.txt"), "rb") as f:
-        assert f.read() == "根目录文件".encode("utf-8")
-    # 内容无损
-    with open(os.path.join(src_dir, "2024", "全家福.jpg"), "rb") as f:
-        assert f.read() == "hello 全家福".encode("utf-8") * 100
-    # 索引已删
-    assert not os.path.exists(os.path.join(src_dir, ".svault"))
+    def test_empty_file_is_authenticated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src, enc, out = (os.path.join(tmp, name) for name in ("src", "enc", "out"))
+            open(src, "wb").close()
+            crypto.encrypt_file(KEY, src, enc)
+            with open(enc, "ab") as stream:
+                stream.write(b"trailing")
+            with self.assertRaises(ValueError):
+                crypto.decrypt_file(KEY, enc, out)
 
-    shutil.rmtree(tmp)
-    print("✓ 文件夹加解密回环（中文名/空目录/空文件/深层嵌套/跨块大文件）")
+    def test_folder_roundtrip_and_nested_encrypted_structure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "照片")
+            make_tree(root)
+            self.assertEqual(crypto.encrypt_folder(KEY, root), 5)
+            with open(os.path.join(root, crypto.INDEX_FILENAME), "rb") as stream:
+                self.assertEqual(stream.read(5), crypto.MAGIC + bytes([crypto.VERSION]))
+            entries = crypto.read_index(KEY, os.path.join(root, crypto.INDEX_FILENAME))
+            travel = next(entry for entry in entries if entry["orig"] == "2024/旅行")
+            year = next(entry for entry in entries if entry["orig"] == "2024")
+            self.assertEqual(os.path.dirname(travel["enc"]).replace("\\", "/"), year["enc"])
+            self.assertEqual(crypto.decrypt_folder(KEY, root), 5)
+            with open(os.path.join(root, "2024", "全家福.jpg"), "rb") as stream:
+                self.assertEqual(stream.read(), "hello 全家福".encode() * 100)
+            self.assertTrue(os.path.isdir(os.path.join(root, "空目录")))
+            self.assertFalse(os.path.exists(os.path.join(root, crypto.INDEX_FILENAME)))
 
+    def test_ciphertext_swap_is_rejected_without_touching_vault(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "vault")
+            os.makedirs(root)
+            for name, value in (("a.txt", b"A" * 32), ("b.txt", b"B" * 32)):
+                with open(os.path.join(root, name), "wb") as stream:
+                    stream.write(value)
+            crypto.encrypt_folder(KEY, root)
+            entries = crypto.read_index(KEY, os.path.join(root, crypto.INDEX_FILENAME))
+            paths = {e["orig"]: crypto._disk_path(root, e["enc"]) for e in entries if e["type"] == "file"}
+            swap = os.path.join(tmp, "swap")
+            os.replace(paths["a.txt"], swap)
+            os.replace(paths["b.txt"], paths["a.txt"])
+            os.replace(swap, paths["b.txt"])
+            with self.assertRaises(ValueError):
+                crypto.decrypt_folder(KEY, root)
+            self.assertTrue(os.path.isfile(os.path.join(root, crypto.INDEX_FILENAME)))
+            self.assertFalse(os.path.exists(os.path.join(root, "a.txt")))
 
-def test_folder_wrong_password():
-    tmp = tempfile.mkdtemp()
-    src_dir = os.path.join(tmp, "d")
-    _mktree(src_dir)
-    encrypt_folder(KEY, src_dir)
-    try:
-        decrypt_folder(derive_master_key("bad"), src_dir)
-        raise AssertionError("错误密码应抛异常")
-    except ValueError:
-        pass
-    # 密文应仍在（未被破坏）
-    assert os.path.isfile(os.path.join(src_dir, ".svault"))
-    shutil.rmtree(tmp)
-    print("✓ 文件夹错误密码被拒（索引 GCM 校验）")
+    def test_malicious_authenticated_index_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            index = os.path.join(tmp, crypto.INDEX_FILENAME)
+            write_raw_v2_index(index, [{
+                "type": "file", "orig": "../../outside", "enc": uuid.uuid4().hex,
+                "file_id": uuid.uuid4().hex, "sha256": "0" * 64, "size": 1, "mtime": 0,
+            }])
+            with self.assertRaisesRegex(ValueError, "非法路径"):
+                crypto.read_index(KEY, index)
 
+    def test_commit_second_rename_failure_rolls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "source")
+            os.makedirs(root)
+            with open(os.path.join(root, "x.txt"), "wb") as stream:
+                stream.write(b"original")
+            real_rename = os.rename
+            calls = {"count": 0}
 
-def test_path_traversal():
-    # 构造含 ../ 的恶意索引
-    tmp = tempfile.mkdtemp()
-    d = os.path.join(tmp, "evil")
-    os.makedirs(d)
-    write_index(KEY, os.path.join(d, ".svault"), [
-        {"type": "file", "orig": "../../etc/passwd", "enc": "abc", "size": 1, "mtime": 0},
-    ])
-    try:
-        decrypt_folder(KEY, d)
-        raise AssertionError("路径穿越应被拒")
-    except ValueError as e:
-        assert "非法路径" in str(e)
-    shutil.rmtree(tmp)
-    print("✓ 路径穿越（../ 恶意索引）被拒")
+            def fail_second(src, dst):
+                calls["count"] += 1
+                if calls["count"] == 2:
+                    raise OSError("simulated commit failure")
+                return real_rename(src, dst)
 
+            with patch("crypto.os.rename", side_effect=fail_second):
+                with self.assertRaises(OSError):
+                    crypto.encrypt_folder(KEY, root)
+            with open(os.path.join(root, "x.txt"), "rb") as stream:
+                self.assertEqual(stream.read(), b"original")
+            self.assertFalse(any(name.startswith(".svault-backup-") for name in os.listdir(tmp)))
+            self.assertFalse(any(name.startswith(".svault-txn-") for name in os.listdir(tmp)))
 
-def test_list_directory():
-    tmp = tempfile.mkdtemp()
-    src_dir = os.path.join(tmp, "照片")
-    _mktree(src_dir)
+    def test_authenticated_recovery_cleans_committed_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "source")
+            os.makedirs(root)
+            with open(os.path.join(root, "x.txt"), "wb") as stream:
+                stream.write(b"original")
+            real_rmtree = shutil.rmtree
 
-    # 加密前：list 返回真实名
-    nodes = list_directory(KEY, src_dir, "")
-    names = {n["name"] for n in nodes}
-    assert "2024" in names and "2025" in names and "空目录" in names
-    assert all(not n["encrypted"] for n in nodes)
+            def fail_backup_cleanup(path, *args, **kwargs):
+                if os.path.basename(path).startswith(".svault-backup-"):
+                    raise OSError("simulated cleanup failure")
+                return real_rmtree(path, *args, **kwargs)
 
-    # 加密后：list 返回原名 + encrypted=true，且结构保留
-    encrypt_folder(KEY, src_dir)
-    nodes = list_directory(KEY, src_dir, "")
-    names = {n["name"] for n in nodes}
-    assert "2024" in names and "2025" in names and "空目录" in names
-    assert all(n["encrypted"] for n in nodes)
-    # 2024 的 children 应含 旅行 和 全家福.jpg
-    y2024 = next(n for n in nodes if n["name"] == "2024")
-    child_names = {c["name"] for c in y2024["children"]}
-    assert "旅行" in child_names and "全家福.jpg" in child_names
+            with patch("crypto.shutil.rmtree", side_effect=fail_backup_cleanup):
+                with self.assertRaises(OSError):
+                    crypto.encrypt_folder(KEY, root)
+            self.assertTrue(os.path.isfile(os.path.join(root, crypto.INDEX_FILENAME)))
+            self.assertTrue(any(name.startswith(".svault-backup-") for name in os.listdir(tmp)))
+            self.assertEqual(crypto.recover_transactions(tmp, KEY), [os.path.realpath(root)])
+            self.assertFalse(any(name.startswith(".svault-backup-") for name in os.listdir(tmp)))
+            self.assertFalse(any(name.startswith(".svault-txn-") for name in os.listdir(tmp)))
 
-    shutil.rmtree(tmp)
-    print("✓ 目录树（加密前真实名 / 加密后原名+encrypted）")
+    def test_tree_paths_are_platform_independent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "tree")
+            make_tree(root)
+            crypto.encrypt_folder(KEY, root)
+            nodes = crypto.list_directory(KEY, root)
+            year = next(node for node in nodes if node["name"] == "2024")
+            self.assertIn("旅行", {child["name"] for child in year["children"]})
+            self.assertIn("全家福.jpg", {child["name"] for child in year["children"]})
 
+    def test_symlink_is_rejected_instead_of_silently_deleted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "tree")
+            outside = os.path.join(tmp, "outside")
+            os.makedirs(root)
+            with open(outside, "wb") as stream:
+                stream.write(b"outside")
+            link = os.path.join(root, "link")
+            try:
+                os.symlink(outside, link)
+            except OSError as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+            with self.assertRaisesRegex(ValueError, "符号链接"):
+                crypto.encrypt_folder(KEY, root)
+            self.assertTrue(os.path.lexists(link))
 
-def test_same_password_same_key():
-    k1 = derive_master_key("abc12345")
-    k2 = derive_master_key("abc12345")
-    k3 = derive_master_key("abc12346")
-    assert k1 == k2
-    assert k1 != k3
-    print("✓ 单密钥：同密码同密钥，不同密码不同密钥")
-
-
-def test_kdf_vector():
-    # DESIGN.md §3.3 冻结的公开测试向量：salt/iterations 被误改立即失败
-    k = derive_master_key("secure-vault-test-password")
-    assert k.hex() == "737d703b7454ea13eb5f9de1972bf9e6d154001e0415c1a04526a8490adeab06", \
-        f"KDF 测试向量不匹配：{k.hex()}"
-    print("✓ KDF 固定测试向量（salt/iterations 冻结）")
-
-
-def test_initialized():
-    tmp = tempfile.mkdtemp()
-    assert not crypto.is_initialized(tmp)
-    assert crypto.find_encrypted_roots(tmp) == []
-    src = os.path.join(tmp, "d")
-    _mktree(src)
-    assert not crypto.is_initialized(tmp)  # 有目录但未加密
-    encrypt_folder(KEY, src)
-    assert crypto.is_initialized(tmp)
-    roots = crypto.find_encrypted_roots(tmp)
-    assert len(roots) == 1 and roots[0].endswith(".svault")
-    shutil.rmtree(tmp)
-    print("✓ 初始化状态与加密根发现")
+    def test_legacy_v1_vault_can_be_decrypted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "legacy")
+            os.makedirs(root)
+            plain = os.path.join(tmp, "plain")
+            with open(plain, "wb") as stream:
+                stream.write(b"legacy-data")
+            enc_name = uuid.uuid4().hex
+            write_v1_file(plain, os.path.join(root, enc_name))
+            write_v1_index(os.path.join(root, crypto.INDEX_FILENAME), [{
+                "type": "file", "orig": "old.txt", "enc": enc_name,
+                "size": 11, "mtime": 0,
+            }])
+            crypto.decrypt_folder(KEY, root)
+            with open(os.path.join(root, "old.txt"), "rb") as stream:
+                self.assertEqual(stream.read(), b"legacy-data")
 
 
 if __name__ == "__main__":
-    test_kdf_vector()
-    test_same_password_same_key()
-    test_initialized()
-    test_roundtrip_file()
-    test_wrong_password()
-    test_tamper_detection()
-    test_folder_roundtrip()
-    test_folder_wrong_password()
-    test_path_traversal()
-    test_list_directory()
-    print("\nALL TESTS PASSED")
+    unittest.main(verbosity=2)

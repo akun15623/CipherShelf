@@ -12,7 +12,7 @@ fnos/docker/
 ├── README.md
 └── secure-vault/            # fnpack 包骨架（appname=secure-vault）
     ├── manifest             # 端口 8090，ctl_stop=true
-    ├── app/docker/docker-compose.yaml   # 本地镜像 secure-vault:latest
+    ├── app/docker/docker-compose.yaml   # 固定发布镜像版本
     ├── config/resource      # docker-project
     ├── config/privilege
     ├── wizard/install       # 安装向导：密码 + 数据文件夹路径
@@ -39,7 +39,7 @@ fnos/docker/
 本应用 compose 使用**线上公开镜像**：
 
 ```
-crpi-dberwpbq5bud3kxp.cn-chengdu.personal.cr.aliyuncs.com/akun15623/secure-vault:latest
+crpi-dberwpbq5bud3kxp.cn-chengdu.personal.cr.aliyuncs.com/akun15623/secure-vault:1.1.0
 ```
 
 该镜像在阿里云 ACR 上**公开**，安装时飞牛会**自动拉取**，无需预先 `docker load`。仅需保证设备能访问公网（阿里云 ACR 国内直连快、稳定）。
@@ -60,7 +60,7 @@ crpi-dberwpbq5bud3kxp.cn-chengdu.personal.cr.aliyuncs.com/akun15623/secure-vault
 | 项 | 值 |
 |----|----|
 | 应用名 | secure-vault（显示名：文件夹加解密）|
-| 镜像 | `crpi-dberwpbq5bud3kxp.cn-chengdu.personal.cr.aliyuncs.com/akun15623/secure-vault:latest`（阿里云 ACR，公开）|
+| 镜像 | `crpi-dberwpbq5bud3kxp.cn-chengdu.personal.cr.aliyuncs.com/akun15623/secure-vault:1.1.0`（阿里云 ACR，公开；发布时应进一步锁定 digest）|
 | 服务端口 | 8090（宿主机）→ 8080（容器）|
 | 平台 | x86 |
 | 数据目录 | 安装向导配置（`wizard_data_path` 挂载到容器 `/data`）|

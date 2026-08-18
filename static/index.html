@@ -130,7 +130,7 @@ const TEMPLATE = `
 
         <template v-if="needCreate">
           <el-input v-model="password" type="password" show-password size="large" class="lock-input"
-                    placeholder="设置密码（至少 8 位）" @keyup.enter="doUnlock" />
+                    placeholder="设置密码（至少 12 位）" @keyup.enter="doUnlock" />
           <el-input v-model="confirmPassword" type="password" show-password size="large" class="lock-input"
                     style="margin-top:12px;" placeholder="再次确认密码" @keyup.enter="doUnlock" />
           <el-button type="primary" size="large" style="width:100%;margin-top:18px;height:48px;"
@@ -234,9 +234,13 @@ const app = createApp({
     const decryptSel = ref([]);
 
     async function api(path, opts = {}) {
+      const method = (opts.method || 'GET').toUpperCase();
+      const headers = {};
+      if (opts.body) headers['Content-Type'] = 'application/json';
+      if (method !== 'GET' && method !== 'HEAD') headers['X-SVault-Request'] = '1';
       const res = await fetch(path, {
         credentials: 'include',
-        headers: opts.body ? { 'Content-Type': 'application/json' } : {},
+        headers,
         ...opts,
       });
       if (res.status === 401) { unlocked.value = false; throw new Error('未解锁'); }
@@ -252,7 +256,7 @@ const app = createApp({
       err.value = '';
       if (!password.value) { err.value = '请输入密码'; return; }
       if (needCreate.value) {
-        if (password.value.length < 8) { err.value = '密码至少 8 位'; return; }
+        if (password.value.length < 12) { err.value = '密码至少 12 位'; return; }
         if (password.value !== confirmPassword.value) { err.value = '两次输入的密码不一致'; return; }
       }
       busy.value = true;
