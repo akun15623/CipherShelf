@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import secrets
 import threading
 import time
@@ -34,6 +35,8 @@ LOGIN_MAX_FAILURES = 10
 STATUS_CACHE_SECONDS = 60
 
 app = FastAPI(title="CipherShelf", docs_url=None, redoc_url=None, openapi_url=None)
+
+logger = logging.getLogger("ciphershelf")
 
 _sessions: dict[str, dict] = {}
 _sessions_lock = threading.Lock()
@@ -193,19 +196,65 @@ def _validate_non_overlapping(paths: list[str]) -> None:
 
 
 def _same_origin(request: Request) -> bool:
+    """判断请求是否同源。
+
+    除直接同源外，兼容飞牛 fnOS 统一网关（/app/{appname}）反向代理：
+    浏览器 Origin 是网关域，后端 Host 被网关改写为内网地址，二者不再相等。
+    """
     origin = request.headers.get("origin")
     if not origin:
         return True
     try:
-        return urlsplit(origin).netloc == request.headers.get("host", "")
+        origin_parts = urlsplit(origin)
     except ValueError:
         return False
+
+    host = request.headers.get("host", "")
+
+    # 1) 直接同源：Origin == Host
+    if origin_parts.netloc == host:
+        return True
+
+    # 2) 反向代理：用 X-Forwarded-Host / X-Forwarded-Proto 还原浏览器视角的 Host
+    fwd_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+    if fwd_host:
+        fwd_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+        try:
+            expected = fwd_host if "://" in fwd_host else f"{fwd_proto or 'http'}://{fwd_host}"
+            if urlsplit(expected).netloc == origin_parts.netloc:
+                return True
+        except ValueError:
+            pass
+
+    # 3) 飞牛统一网关在 NAS 登录态校验通过后注入的可信同源标识
+    if request.headers.get("x-trim-userid"):
+        return True
+
+    # 4) 主机名一致（忽略端口/scheme 差异，覆盖网关仅改写端口的场景）
+    try:
+        if origin_parts.hostname and origin_parts.hostname == urlsplit("//" + host).hostname:
+            return True
+    except ValueError:
+        pass
+
+    return False
 
 
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
     if request.url.path.startswith("/api/") and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
-        if request.headers.get("x-svault-request") != "1" or not _same_origin(request):
+        has_header = request.headers.get("x-svault-request") == "1"
+        same_origin = _same_origin(request)
+        if not has_header or not same_origin:
+            logger.warning(
+                "CSRF rejected: method=%s path=%s svault_header=%s origin=%r host=%r "
+                "fwd_host=%r fwd_proto=%r trim_userid=%s",
+                request.method, request.url.path, has_header,
+                request.headers.get("origin"), request.headers.get("host"),
+                request.headers.get("x-forwarded-host"),
+                request.headers.get("x-forwarded-proto"),
+                bool(request.headers.get("x-trim-userid")),
+            )
             return JSONResponse(status_code=403, content={"detail": "拒绝跨站请求"})
     response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")

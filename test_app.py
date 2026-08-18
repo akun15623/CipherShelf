@@ -96,6 +96,30 @@ class AppTests(unittest.TestCase):
             )
             self.assertIn(response.status_code, (400, 403), response.text)
 
+    def test_reverse_proxy_gateway_origin_is_accepted(self):
+        # 飞牛统一网关反代场景：Origin 是网关域、Host 被改写为内网地址，
+        # 但网关登录态校验通过后注入 X-Trim-Userid，POST 不应被 CSRF 拒绝。
+        os.makedirs(os.path.join(self.root, "docs"))
+        with open(os.path.join(self.root, "docs", "a.txt"), "wb") as stream:
+            stream.write(b"x")
+        proxy_headers = {
+            "X-SVault-Request": "1",
+            "Origin": "https://192.168.10.4:5667",
+            "Host": "127.0.0.1:8090",
+            "X-Trim-Userid": "1000",
+        }
+        response = self.client.post(
+            "/api/unlock", headers=proxy_headers,
+            json={"password": PASSWORD, "password_confirmation": PASSWORD},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        token = response.json()["token"]
+        auth = {**proxy_headers, "Authorization": f"Bearer {token}"}
+        response = self.client.post("/api/encrypt", headers=auth, json={"paths": ["docs"]})
+        self.assertEqual(response.status_code, 200, response.text)
+        result = self.wait_task(response.json()["task_id"])
+        self.assertEqual(result["status"], "done", result)
+
     def test_bearer_session_is_invalidated_by_lock_without_cookie(self):
         response = self.unlock()
         token = response.json()["token"]
