@@ -1,59 +1,53 @@
 """
-secure-vault 加密核心
+secure-vault 加密核心（v2：文件夹就地加解密工具）
 
-设计要点（防物理失窃 / 外人无密码不可读）：
-- 密码 -> 主密钥：PBKDF2-HMAC-SHA256（随机 salt，默认 60 万次迭代）
-- 每个文件用独立随机 data_key 加密（AES-256-GCM）；data_key 再用主密钥加密存进文件头。
-  好处：改密码只需重算头部，不用重加密整个文件体。
-- 大文件（视频/音频）按 1MB 分块加密，每块独立 AES-GCM，块序号作为 AAD。
-  好处：支持随机访问（seek），视频拖进度条只需解密对应块。
-- 文件名 / MIME 也加密，防止"外面看到文件名和类型"的元数据泄露。
-- 元数据存 SQLite（vault.db）：salt、验证器、加密的文件清单。
+设计要点（单密钥模型）：
+- 一个密码 -> 一个主密钥：PBKDF2-HMAC-SHA256（固定 salt，60 万次迭代）。
+  同一密码永远派生出同一个主密钥。
+- 所有文件内容、目录名/文件名、索引，全部用这同一个主密钥加密。
+- 就地加密：保留目录结构，但每个目录名/文件名变成随机 32 位 hex 密文。
+- 索引 .svault：记录 原名 <-> 密文 映射，整体用主密钥 AES-GCM 加密。
+- 密码验证：解密索引时 GCM 认证失败 = 密码错误（无需单独 verifier）。
 
-磁盘上只有：密文文件 + vault.db，不含任何明文内容、明文文件名、明文密钥。
+磁盘上只有：密文文件（乱码名）+ 一个加密索引 .svault，无任何明文元数据。
 """
 
 from __future__ import annotations
 
-import base64
+import json
 import os
-import sqlite3
-import time
+import shutil
 import uuid
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes, hmac as _hmac
+from cryptography.hazmat.primitives import hashes
 
-MAGIC = b"VLKT"
+MAGIC = b"SVLT"
 VERSION = 1
 KEY_SIZE = 32            # AES-256
 NONCE_SIZE = 12          # GCM 推荐 12 字节
-SALT_SIZE = 16
 TAG_SIZE = 16            # GCM tag
 BLOCK_SIZE = 1024 * 1024  # 1 MiB 分块
-ITERATIONS = 600_000      # PBKDF2 迭代次数（本地解锁可接受的安全强度）
+ITERATIONS = 600_000      # PBKDF2 迭代次数
 
-# 文件头布局
-HEADER_MAGIC = 4
-HEADER_VERSION = 1
-HEADER_DATA_KEY_NONCE = NONCE_SIZE
-HEADER_DATA_KEY_CT = KEY_SIZE + TAG_SIZE   # data_key 密文 + tag
-HEADER_BLOCK_SIZE = 4
-HEADER_SIZE = (
-    HEADER_MAGIC + HEADER_VERSION + HEADER_DATA_KEY_NONCE + HEADER_DATA_KEY_CT + HEADER_BLOCK_SIZE
-)
+# 固定盐（代码内置常量，16 字节）：保证「同一密码 = 同一密钥」。
+# 注意：这是「都用一个密钥」心智的直接代价——任何用同一密码的人都能互相解密。
+DEFAULT_SALT = b"secure-vault-v2."
 
+# 密文文件头：magic(4) + version(1) + chunk_size(4) + block_count(4) = 13 字节
+HEADER_SIZE = 4 + 1 + 4 + 4
 
-def _b64(data: bytes) -> str:
-    return base64.b64encode(data).decode("ascii")
+# 索引加密头：magic(4) + version(1) + nonce(12) = 17 字节
+INDEX_HEADER_SIZE = 4 + 1 + NONCE_SIZE
+
+INDEX_FILENAME = ".svault"
 
 
-def _unb64(s: str) -> bytes:
-    return base64.b64decode(s.encode("ascii"))
-
-
-def derive_master_key(password: str, salt: bytes, iterations: int = ITERATIONS) -> bytes:
+# ---------------------------------------------------------------------------
+# 密钥派生
+# ---------------------------------------------------------------------------
+def derive_master_key(password: str, salt: bytes = DEFAULT_SALT, iterations: int = ITERATIONS) -> bytes:
     """从密码派生主密钥。password 不应被记录到任何日志。"""
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
@@ -64,577 +58,374 @@ def derive_master_key(password: str, salt: bytes, iterations: int = ITERATIONS) 
     return kdf.derive(password.encode("utf-8"))
 
 
-def make_verifier(master_key: bytes) -> str:
-    """生成验证器：解锁时用来校验密码是否正确（不存密码本身）。"""
-    h = _hmac.HMAC(master_key, hashes.SHA256())
-    h.update(b"secure-vault-verifier")
-    return _b64(h.finalize())
+# ---------------------------------------------------------------------------
+# 文件加解密（流式，单密钥）
+# ---------------------------------------------------------------------------
+def _file_aad(block_index: int) -> bytes:
+    return MAGIC + bytes([VERSION]) + block_index.to_bytes(8, "big")
 
 
-def verify_master_key(master_key: bytes, verifier_b64: str) -> bool:
-    try:
-        expected = _unb64(verifier_b64)
-    except Exception:
-        return False
-    h = _hmac.HMAC(master_key, hashes.SHA256())
-    h.update(b"secure-vault-verifier")
-    try:
-        h.verify(expected)
-        return True
-    except Exception:
-        return False
-
-
-def encrypt_name(master_key: bytes, file_id: str, plaintext: str) -> str:
-    """加密文件名 / MIME（AAD 绑定 file_id，防止跨文件替换）。"""
-    nonce = os.urandom(NONCE_SIZE)
-    aes = AESGCM(master_key)
-    ct = aes.encrypt(nonce, plaintext.encode("utf-8"), file_id.encode("utf-8"))
-    return _b64(nonce + ct)
-
-
-def decrypt_name(master_key: bytes, file_id: str, cipher_b64: str) -> str:
-    raw = _unb64(cipher_b64)
-    nonce, ct = raw[:NONCE_SIZE], raw[NONCE_SIZE:]
-    aes = AESGCM(master_key)
-    pt = aes.decrypt(nonce, ct, file_id.encode("utf-8"))
-    return pt.decode("utf-8")
-
-
-def encrypt_file(master_key: bytes, file_id: str, src_path: str, dst_path: str) -> tuple[int, int]:
-    """把明文文件 src_path 加密写入 dst_path。返回 (明文字节数, 密文字节数)。
+def encrypt_file(master_key: bytes, src_path: str, dst_path: str) -> None:
+    """把明文 src_path 流式加密写入 dst_path。
 
     dst 布局：
-      [magic 4][version 1][data_key_nonce 12][data_key_ct 48][block_size 4]
-      然后每块：[nonce 12][ciphertext+tag]
-    每块 GCM 的 AAD = file_id + block_index(8B big-endian)，防块重排/替换。
+      [magic 4][version 1][chunk_size 4][block_count 4]
+      然后每块：[nonce 12][ciphertext + tag 16]
+    每块 GCM 的 AAD = "SVLT" + version + block_index(8B BE)，防块重排/替换。
     """
-    data_key = os.urandom(KEY_SIZE)
-    aes_data = AESGCM(data_key)
+    aes = AESGCM(master_key)
+    plain_size = os.path.getsize(src_path)
+    block_count = (plain_size + BLOCK_SIZE - 1) // BLOCK_SIZE  # 空文件 = 0
 
-    # data_key 用 master_key 加密存头部
-    dk_nonce = os.urandom(NONCE_SIZE)
-    aes_master = AESGCM(master_key)
-    dk_ct = aes_master.encrypt(dk_nonce, data_key, b"data-key")
-
-    plain_size = 0
     with open(src_path, "rb") as fin, open(dst_path, "wb") as fout:
         fout.write(MAGIC)
         fout.write(bytes([VERSION]))
-        fout.write(dk_nonce)
-        fout.write(dk_ct)
-        fout.write(BLOCK_SIZE.to_bytes(HEADER_BLOCK_SIZE, "big"))
+        fout.write(BLOCK_SIZE.to_bytes(4, "big"))
+        fout.write(block_count.to_bytes(4, "big"))
 
         block_index = 0
         while True:
             block = fin.read(BLOCK_SIZE)
             if not block:
                 break
-            plain_size += len(block)
             nonce = os.urandom(NONCE_SIZE)
-            aad = file_id.encode("utf-8") + block_index.to_bytes(8, "big")
-            ct = aes_data.encrypt(nonce, block, aad)
+            ct = aes.encrypt(nonce, block, _file_aad(block_index))
             fout.write(nonce)
             fout.write(ct)
             block_index += 1
 
-    cipher_size = os.path.getsize(dst_path)
-    return plain_size, cipher_size
 
+def decrypt_file(master_key: bytes, src_path: str, dst_path: str) -> None:
+    """把密文 src_path 流式解密写入 dst_path。密码错/密文损坏会抛 InvalidTag。"""
+    aes = AESGCM(master_key)
+    with open(src_path, "rb") as fin, open(dst_path, "wb") as fout:
+        magic = fin.read(4)
+        if magic != MAGIC:
+            raise ValueError("不是有效的加密文件（magic 不匹配）")
+        version = fin.read(1)[0]
+        if version != VERSION:
+            raise ValueError(f"不支持的版本：{version}")
+        chunk_size = int.from_bytes(fin.read(4), "big")
+        block_count = int.from_bytes(fin.read(4), "big")
 
-def _read_header(f):
-    """读取并解析文件头，返回 (data_key_nonce, data_key_ct, block_size)。"""
-    f.seek(0)
-    magic = f.read(HEADER_MAGIC)
-    if magic != MAGIC:
-        raise ValueError("不是有效的加密文件（magic 不匹配）")
-    version = f.read(HEADER_VERSION)[0]
-    if version != VERSION:
-        raise ValueError(f"不支持的版本：{version}")
-    dk_nonce = f.read(HEADER_DATA_KEY_NONCE)
-    dk_ct = f.read(HEADER_DATA_KEY_CT)
-    block_size = int.from_bytes(f.read(HEADER_BLOCK_SIZE), "big")
-    return dk_nonce, dk_ct, block_size
-
-
-def _decrypt_data_key(master_key: bytes, dk_nonce: bytes, dk_ct: bytes) -> bytes:
-    aes_master = AESGCM(master_key)
-    return aes_master.decrypt(dk_nonce, dk_ct, b"data-key")
-
-
-def block_ranges_for(start: int, length: int, block_size: int):
-    """给定明文 [start, start+length)，返回需要解密的块序号列表。"""
-    if length <= 0:
-        return []
-    first = start // block_size
-    last = (start + length - 1) // block_size
-    return list(range(first, last + 1))
-
-
-def decrypt_range(master_key: bytes, file_id: str, path: str, start: int, length: int) -> bytes:
-    """解密明文 [start, start+length)。start/length 为明文坐标系。
-
-    用于 HTTP Range：视频 seek 时只解密涉及的块。
-    """
-    with open(path, "rb") as f:
-        dk_nonce, dk_ct, block_size = _read_header(f)
-        data_key = _decrypt_data_key(master_key, dk_nonce, dk_ct)
-        aes_data = AESGCM(data_key)
-
-        out = bytearray()
-        needed_start = start
-        needed_end = start + length
-        for idx in block_ranges_for(start, length, block_size):
-            block_off = HEADER_SIZE + idx * (NONCE_SIZE + block_size + TAG_SIZE)
-            f.seek(block_off)
-            nonce = f.read(NONCE_SIZE)
-            ct = f.read(block_size + TAG_SIZE)
-            aad = file_id.encode("utf-8") + idx.to_bytes(8, "big")
-            pt = aes_data.decrypt(nonce, ct, aad)
-            blk_start = idx * block_size
-            s = max(blk_start, needed_start) - blk_start
-            e = min(blk_start + len(pt), needed_end) - blk_start
-            if e > s:
-                out += pt[s:e]
-        return bytes(out)
-
-
-def decrypt_full(master_key: bytes, file_id: str, path: str) -> bytes:
-    """解密整个文件（小文件 / 图片预览用）。"""
-    total = plaintext_size(master_key, file_id, path)
-    return decrypt_range(master_key, file_id, path, 0, total)
-
-
-def decrypt_chunks(master_key: bytes, file_id: str, path: str, chunk_size: int = 4 * 1024 * 1024):
-    """流式解密整个文件，按 chunk_size 字节分块 yield。
-
-    用于批量导出（zip 下载 / 离线解密 CLI），避免把大文件整个读进内存。
-    """
-    total = plaintext_size(master_key, file_id, path)
-    offset = 0
-    while offset < total:
-        n = min(chunk_size, total - offset)
-        yield decrypt_range(master_key, file_id, path, offset, n)
-        offset += n
-
-
-def plaintext_size(master_key: bytes, file_id: str, path: str) -> int:
-    """根据密文文件大小反推明文大小（不真正解密全文件）。"""
-    with open(path, "rb") as f:
-        _, _, block_size = _read_header(f)
-    cipher_len = os.path.getsize(path)
-    body_len = cipher_len - HEADER_SIZE
-    if body_len == 0:
-        return 0
-    full_blocks = body_len // (NONCE_SIZE + block_size + TAG_SIZE)
-    remainder = body_len - full_blocks * (NONCE_SIZE + block_size + TAG_SIZE)
-    last_ct_len = remainder - NONCE_SIZE if remainder > NONCE_SIZE else 0
-    return full_blocks * block_size + max(0, last_ct_len - TAG_SIZE)
+        for block_index in range(block_count):
+            nonce = fin.read(NONCE_SIZE)
+            ct = fin.read(chunk_size + TAG_SIZE)
+            pt = aes.decrypt(nonce, ct, _file_aad(block_index))  # GCM 失败抛 InvalidTag
+            fout.write(pt)
 
 
 # ---------------------------------------------------------------------------
-# 保险库（SQLite 元数据）
+# 索引 .svault（加密 JSON）
 # ---------------------------------------------------------------------------
+def _index_aad() -> bytes:
+    return MAGIC + bytes([VERSION]) + b"index"
 
-class Vault:
-    """管理 vault.db：salt、验证器、加密的文件元数据清单。"""
 
-    def __init__(self, data_dir: str):
-        self.data_dir = data_dir
-        self.db_path = os.path.join(data_dir, "vault.db")
-        self.files_dir = os.path.join(data_dir, "files")
-        os.makedirs(self.files_dir, exist_ok=True)
-        self._init_db()
+def write_index(master_key: bytes, path: str, entries: list[dict]) -> None:
+    """把 entries 用主密钥加密写入索引文件 path。"""
+    data = json.dumps(
+        {"magic": "SVLT", "version": VERSION, "entries": entries},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    aes = AESGCM(master_key)
+    nonce = os.urandom(NONCE_SIZE)
+    ct = aes.encrypt(nonce, data, _index_aad())
+    with open(path, "wb") as f:
+        f.write(MAGIC)
+        f.write(bytes([VERSION]))
+        f.write(nonce)
+        f.write(ct)
 
-    def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
 
-    def _init_db(self) -> None:
-        with self._conn() as c:
-            c.execute(
-                """CREATE TABLE IF NOT EXISTS meta (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                )"""
-            )
-            c.execute(
-                """CREATE TABLE IF NOT EXISTS files (
-                    id TEXT PRIMARY KEY,
-                    name_enc TEXT NOT NULL,
-                    mime_enc TEXT NOT NULL,
-                    size INTEGER NOT NULL,
-                    cipher_size INTEGER NOT NULL,
-                    thumb INTEGER NOT NULL DEFAULT 0,
-                    folder_id_enc TEXT NOT NULL DEFAULT '',
-                    created INTEGER NOT NULL
-                )"""
-            )
-            c.execute(
-                """CREATE TABLE IF NOT EXISTS folders (
-                    id TEXT PRIMARY KEY,
-                    name_enc TEXT NOT NULL,
-                    parent_id_enc TEXT NOT NULL DEFAULT '',
-                    created INTEGER NOT NULL
-                )"""
-            )
-            # 迁移：旧版本 folders 表缺少 parent_id_enc 列时补齐
-            cols = [r[1] for r in c.execute("PRAGMA table_info(folders)").fetchall()]
-            if "parent_id_enc" not in cols:
-                c.execute("ALTER TABLE folders ADD COLUMN parent_id_enc TEXT NOT NULL DEFAULT ''")
-            # 迁移：旧版本 files 表缺少 folder_id_enc 列时补齐
-            fcols = [r[1] for r in c.execute("PRAGMA table_info(files)").fetchall()]
-            if "folder_id_enc" not in fcols:
-                c.execute("ALTER TABLE files ADD COLUMN folder_id_enc TEXT NOT NULL DEFAULT ''")
+def read_index(master_key: bytes, path: str) -> list[dict]:
+    """解密并解析索引，返回 entries。密码错/损坏抛 ValueError。"""
+    with open(path, "rb") as f:
+        magic = f.read(4)
+        if magic != MAGIC:
+            raise ValueError("不是有效的索引文件（magic 不匹配）")
+        version = f.read(1)[0]
+        if version != VERSION:
+            raise ValueError(f"不支持的索引版本：{version}")
+        nonce = f.read(NONCE_SIZE)
+        ct = f.read()
+    aes = AESGCM(master_key)
+    try:
+        data = aes.decrypt(nonce, ct, _index_aad())
+    except Exception:
+        raise ValueError("密码错误或索引已损坏")
+    obj = json.loads(data.decode("utf-8"))
+    return obj.get("entries", [])
 
-    # -- 初始化 / 解锁 -----------------------------------------------------
-    @property
-    def exists(self) -> bool:
-        with self._conn() as c:
-            row = c.execute("SELECT 1 FROM meta WHERE key='verifier'").fetchone()
-        return row is not None
 
-    def initialize(self, password: str) -> None:
-        if self.exists:
-            raise ValueError("保险库已存在")
-        salt = os.urandom(SALT_SIZE)
-        master_key = derive_master_key(password, salt)
-        verifier = make_verifier(master_key)
-        with self._conn() as c:
-            c.execute("INSERT INTO meta(key,value) VALUES('version',?)", (str(VERSION),))
-            c.execute("INSERT INTO meta(key,value) VALUES('kdf_salt',?)", (_b64(salt),))
-            c.execute("INSERT INTO meta(key,value) VALUES('kdf_iterations',?)", (str(ITERATIONS),))
-            c.execute("INSERT INTO meta(key,value) VALUES('verifier',?)", (verifier,))
+# ---------------------------------------------------------------------------
+# 高层：就地加密 / 还原解密
+# ---------------------------------------------------------------------------
+def _scan_folder(root_dir: str) -> tuple[list[tuple[str, int, int]], list[str]]:
+    """扫描文件夹，返回 (files, dirs)。
+    files = [(相对路径, size, mtime), ...]（稳定排序）
+    dirs  = [相对路径, ...]（稳定排序）
+    符号链接不跟随、被跳过。
+    """
+    files: list[tuple[str, int, int]] = []
+    dirs: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root_dir, followlinks=False):
+        rel_dir = os.path.relpath(dirpath, root_dir)
+        if rel_dir != ".":
+            dirs.append(rel_dir)
+        dirnames.sort()
+        for fn in sorted(filenames):
+            full = os.path.join(dirpath, fn)
+            if os.path.islink(full):
+                continue  # 跳过符号链接
+            st = os.stat(full)
+            rel = os.path.relpath(full, root_dir)
+            files.append((rel, st.st_size, int(st.st_mtime)))
+    dirs.sort()
+    return files, dirs
 
-    def unlock(self, password: str) -> bytes | None:
-        if not self.exists:
-            return None
-        with self._conn() as c:
-            salt = _unb64(c.execute("SELECT value FROM meta WHERE key='kdf_salt'").fetchone()["value"])
-            iters = int(c.execute("SELECT value FROM meta WHERE key='kdf_iterations'").fetchone()["value"])
-            verifier = c.execute("SELECT value FROM meta WHERE key='verifier'").fetchone()["value"]
-        master_key = derive_master_key(password, salt, iters)
-        if verify_master_key(master_key, verifier):
-            return master_key
-        return None
 
-    # -- 文件操作（需已解锁，传入 master_key）-----------------------------
-    def add_file(self, master_key: bytes, src_path: str, display_name: str, mime: str, folder_id: str = "") -> str:
-        file_id = uuid.uuid4().hex
-        dst_path = os.path.join(self.files_dir, file_id + ".enc")
-        plain_size, cipher_size = encrypt_file(master_key, file_id, src_path, dst_path)
+def _validate_orig(orig: str) -> None:
+    """校验原相对路径：拒绝绝对路径、../、空段。"""
+    if os.path.isabs(orig):
+        raise ValueError(f"索引包含非法路径（绝对路径）：{orig}")
+    norm = os.path.normpath(orig)
+    if norm.startswith("..") or norm == ".." or os.path.isabs(norm):
+        raise ValueError(f"索引包含非法路径：{orig}")
+    if any(seg in ("", ".", "..") for seg in orig.split("/")):
+        raise ValueError(f"索引包含非法路径：{orig}")
 
-        with self._conn() as c:
-            c.execute(
-                "INSERT INTO files(id,name_enc,mime_enc,size,cipher_size,thumb,folder_id_enc,created) VALUES(?,?,?,?,?,0,?,?)",
-                (
-                    file_id,
-                    encrypt_name(master_key, file_id, display_name),
-                    encrypt_name(master_key, file_id, mime or "application/octet-stream"),
-                    plain_size,
-                    cipher_size,
-                    encrypt_name(master_key, file_id, folder_id or ""),
-                    int(time.time()),
-                ),
-            )
-        return file_id
 
-    def move_file(self, master_key: bytes, file_id: str, folder_id: str) -> bool:
-        with self._conn() as c:
-            cur = c.execute(
-                "UPDATE files SET folder_id_enc=? WHERE id=?",
-                (encrypt_name(master_key, file_id, folder_id or ""), file_id),
-            )
-            return cur.rowcount > 0
+def encrypt_folder(
+    master_key: bytes,
+    root_dir: str,
+    progress=None,
+) -> int:
+    """就地加密文件夹 root_dir。
 
-    def list_files(self, master_key: bytes, folder_id: str = "") -> list[dict]:
-        with self._conn() as c:
-            rows = c.execute("SELECT * FROM files ORDER BY created DESC").fetchall()
-        out = []
-        for r in rows:
-            f_folder = decrypt_name(master_key, r["id"], r["folder_id_enc"]) if r["folder_id_enc"] else ""
-            if f_folder != (folder_id or ""):
-                continue
-            out.append({
-                "id": r["id"],
-                "name": decrypt_name(master_key, r["id"], r["name_enc"]),
-                "mime": decrypt_name(master_key, r["id"], r["mime_enc"]),
-                "size": r["size"],
-                "created": r["created"],
-                "has_thumb": bool(r["thumb"]),
-                "folder_id": f_folder,
+    返回加密的文件数量。progress(done_bytes, total_bytes, current_label) 可选回调。
+    原子性：先全部加密到 stage 临时目录，成功后才替换 + 删明文，中途失败不丢数据。
+    """
+    root_dir = os.path.abspath(root_dir)
+    if not os.path.isdir(root_dir):
+        raise ValueError(f"目录不存在：{root_dir}")
+    if os.path.isfile(os.path.join(root_dir, INDEX_FILENAME)):
+        raise ValueError("该目录已加密（已存在 .svault）")
+
+    files, dirs = _scan_folder(root_dir)
+
+    # 生成密文名（uuid4().hex，32 位）
+    enc_of: dict[str, str] = {}
+    for d in dirs:
+        enc_of[d] = uuid.uuid4().hex
+    for rel, _sz, _mt in files:
+        enc_of[rel] = uuid.uuid4().hex
+
+    # stage 目录（同盘，root_dir 的父目录下）
+    parent = os.path.dirname(root_dir) or "."
+    stage = os.path.join(parent, ".svault-stage-" + uuid.uuid4().hex)
+    os.makedirs(stage, exist_ok=True)
+
+    total = sum(sz for _rel, sz, _mt in files)
+    done = 0
+
+    try:
+        # 1. 在 stage 下创建密文目录结构
+        for d in dirs:
+            os.makedirs(os.path.join(stage, enc_of[d]), exist_ok=True)
+
+        # 2. 加密所有文件到 stage（密文相对路径）
+        entries: list[dict] = []
+        for rel, size, mtime in files:
+            enc_name = enc_of[rel]
+            orig_parent = os.path.dirname(rel)
+            if orig_parent:
+                enc_full = os.path.join(enc_of[orig_parent], enc_name)
+            else:
+                enc_full = enc_name
+            dst = os.path.join(stage, enc_full)
+            encrypt_file(master_key, os.path.join(root_dir, rel), dst)
+            entries.append({
+                "type": "file", "orig": rel, "enc": enc_full,
+                "size": size, "mtime": mtime,
             })
-        return out
+            done += size
+            if progress:
+                progress(done, total, rel)
 
-    def copy_file(self, master_key: bytes, src_file_id: str, dst_folder_id: str = "") -> str | None:
-        """复制文件（流式：逐块解密+重加密，生成独立新 data_key，不占内存）。"""
-        rec = self.get_record(src_file_id)
-        if not rec:
-            return None
-        src_path = self.get_file_path(src_file_id)
-        new_id = uuid.uuid4().hex
-        dst_path = os.path.join(self.files_dir, new_id + ".enc")
+        # 3. 目录 entries
+        for d in dirs:
+            entries.append({"type": "dir", "orig": d, "enc": enc_of[d]})
 
-        # 新 data_key（每文件独立密钥）
-        new_data_key = os.urandom(KEY_SIZE)
-        new_aes = AESGCM(new_data_key)
-        dk_nonce = os.urandom(NONCE_SIZE)
-        dk_ct = AESGCM(master_key).encrypt(dk_nonce, new_data_key, b"data-key")
+        # 4. 写加密索引
+        write_index(master_key, os.path.join(stage, INDEX_FILENAME), entries)
 
-        # 读原 data_key
-        with open(src_path, "rb") as fin:
-            old_dk_nonce, old_dk_ct, block_size = _read_header(fin)
-        old_data_key = _decrypt_data_key(master_key, old_dk_nonce, old_dk_ct)
-        old_aes = AESGCM(old_data_key)
+        # 5. 原子替换：移走明文 -> stage 变 root_dir -> 删明文
+        backup = os.path.join(parent, ".svault-backup-" + uuid.uuid4().hex)
+        os.rename(root_dir, backup)
+        os.rename(stage, root_dir)
+        shutil.rmtree(backup, ignore_errors=True)
 
-        plain_size = 0
-        with open(src_path, "rb") as fin, open(dst_path, "wb") as fout:
-            fout.write(MAGIC)
-            fout.write(bytes([VERSION]))
-            fout.write(dk_nonce)
-            fout.write(dk_ct)
-            fout.write(block_size.to_bytes(HEADER_BLOCK_SIZE, "big"))
+        return len(files)
+    except Exception:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
 
-            fin.seek(HEADER_SIZE)
-            block_index = 0
-            while True:
-                nonce = fin.read(NONCE_SIZE)
-                if len(nonce) < NONCE_SIZE:
-                    break
-                ct = fin.read(block_size + TAG_SIZE)
-                if len(ct) < TAG_SIZE:
-                    break
-                old_aad = src_file_id.encode("utf-8") + block_index.to_bytes(8, "big")
-                pt = old_aes.decrypt(nonce, ct, old_aad)
-                plain_size += len(pt)
-                new_nonce = os.urandom(NONCE_SIZE)
-                new_aad = new_id.encode("utf-8") + block_index.to_bytes(8, "big")
-                new_ct = new_aes.encrypt(new_nonce, pt, new_aad)
-                fout.write(new_nonce)
-                fout.write(new_ct)
-                block_index += 1
 
-        cipher_size = os.path.getsize(dst_path)
-        name = decrypt_name(master_key, src_file_id, rec["name_enc"])
-        mime = decrypt_name(master_key, src_file_id, rec["mime_enc"])
-        with self._conn() as c:
-            c.execute(
-                "INSERT INTO files(id,name_enc,mime_enc,size,cipher_size,thumb,folder_id_enc,created) VALUES(?,?,?,?,?,0,?,?)",
-                (
-                    new_id,
-                    encrypt_name(master_key, new_id, name),
-                    encrypt_name(master_key, new_id, mime),
-                    plain_size,
-                    cipher_size,
-                    encrypt_name(master_key, new_id, dst_folder_id or ""),
-                    int(time.time()),
-                ),
-            )
-        # 复制缩略图
-        if self.has_thumb(src_file_id):
-            try:
-                self.save_thumb(master_key, new_id, self.read_thumb(master_key, src_file_id))
-            except Exception:
-                pass
-        return new_id
+def decrypt_folder(
+    master_key: bytes,
+    root_dir: str,
+    output_dir: str | None = None,
+    progress=None,
+) -> int:
+    """解密（还原）加密文件夹 root_dir。
 
-    # -- 文件夹操作 -----------------------------------------------------
-    def create_folder(self, master_key: bytes, name: str, parent_id: str = "") -> str:
-        folder_id = uuid.uuid4().hex
-        with self._conn() as c:
-            c.execute(
-                "INSERT INTO folders(id,name_enc,parent_id_enc,created) VALUES(?,?,?,?)",
-                (folder_id, encrypt_name(master_key, folder_id, name),
-                 encrypt_name(master_key, folder_id, parent_id or ""), int(time.time())),
-            )
-        return folder_id
+    output_dir 为空时原地还原；否则还原到 output_dir。
+    返回还原的文件数量。progress 同 encrypt_folder。
+    原子性：先全部解密到 stage，成功后替换 + 删密文，中途失败不丢密文。
+    """
+    root_dir = os.path.abspath(root_dir)
+    index_path = os.path.join(root_dir, INDEX_FILENAME)
+    if not os.path.isfile(index_path):
+        raise ValueError(f"未找到索引文件 {INDEX_FILENAME}，该目录可能未加密")
 
-    def list_folders(self, master_key: bytes) -> list[dict]:
-        with self._conn() as c:
-            rows = c.execute("SELECT * FROM folders ORDER BY created ASC").fetchall()
-        return [
-            {
-                "id": r["id"],
-                "name": decrypt_name(master_key, r["id"], r["name_enc"]),
-                "parent_id": decrypt_name(master_key, r["id"], r["parent_id_enc"]) if r["parent_id_enc"] else "",
-                "created": r["created"],
+    entries = read_index(master_key, index_path)  # 密码错抛 ValueError
+
+    files = [e for e in entries if e.get("type") == "file"]
+    dirs = [e for e in entries if e.get("type") == "dir"]
+
+    # 路径安全校验
+    for e in entries:
+        _validate_orig(e["orig"])
+
+    output = os.path.abspath(output_dir) if output_dir else root_dir
+    parent = os.path.dirname(output) or "."
+    os.makedirs(parent, exist_ok=True)
+    if output != root_dir and os.path.exists(output):
+        raise ValueError(f"输出目录已存在：{output}")
+
+    stage = os.path.join(parent, ".svault-stage-" + uuid.uuid4().hex)
+    os.makedirs(stage, exist_ok=True)
+
+    total = sum(e.get("size", 0) for e in files)
+    done = 0
+
+    try:
+        # 1. 创建明文目录结构
+        for d in dirs:
+            os.makedirs(os.path.join(stage, d["orig"]), exist_ok=True)
+
+        # 2. 解密所有文件到 stage（原相对路径）
+        for e in files:
+            src = os.path.join(root_dir, e["enc"])
+            dst = os.path.join(stage, e["orig"])
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            decrypt_file(master_key, src, dst)
+            mtime = e.get("mtime", 0)
+            os.utime(dst, (mtime, mtime))
+            done += e.get("size", 0)
+            if progress:
+                progress(done, total, e["orig"])
+
+        # 3. 原子替换
+        if output == root_dir:
+            backup = os.path.join(parent, ".svault-backup-" + uuid.uuid4().hex)
+            os.rename(root_dir, backup)
+            os.rename(stage, root_dir)
+            shutil.rmtree(backup, ignore_errors=True)
+        else:
+            os.rename(stage, output)
+
+        return len(files)
+    except Exception:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+
+
+# ---------------------------------------------------------------------------
+# 树：列出目录（Web 用），已加密目录返回索引中的原文件名
+# ---------------------------------------------------------------------------
+def list_directory(master_key: bytes, root_dir: str, rel_path: str = "") -> list[dict]:
+    """列出 root_dir 下 rel_path 的子节点。
+
+    未加密目录 -> 返回单层节点（真实磁盘名，encrypted=false）。
+    已加密目录（含 .svault）-> 返回索引重建的完整子树（原名，encrypted=true）。
+    """
+    abs_path = os.path.abspath(os.path.join(root_dir, rel_path)) if rel_path else os.path.abspath(root_dir)
+    if not os.path.isdir(abs_path):
+        raise ValueError(f"目录不存在：{abs_path}")
+
+    index_path = os.path.join(abs_path, INDEX_FILENAME)
+    if os.path.isfile(index_path):
+        # 已加密目录：从索引重建完整子树
+        entries = read_index(master_key, index_path)
+        return _build_tree_from_index(entries)
+
+    # 未加密目录：单层真实名
+    nodes: list[dict] = []
+    for name in sorted(os.listdir(abs_path)):
+        full = os.path.join(abs_path, name)
+        if os.path.islink(full):
+            continue
+        if os.path.isdir(full):
+            encrypted = os.path.isfile(os.path.join(full, INDEX_FILENAME))
+            nodes.append({"name": name, "type": "dir", "encrypted": encrypted,
+                          "size": None, "mtime": None})
+        else:
+            st = os.stat(full)
+            nodes.append({"name": name, "type": "file", "encrypted": False,
+                          "size": st.st_size, "mtime": int(st.st_mtime)})
+    return nodes
+
+
+def _build_tree_from_index(entries: list[dict]) -> list[dict]:
+    """把索引 entries 重建为嵌套树（顶层节点列表，children 为 list）。"""
+    # 用 dict 树构建，最后统一转 list
+    tree: dict[str, dict] = {}
+
+    def ensure_dir_node(path: list[str]) -> dict:
+        node = tree
+        for seg in path:
+            child = node.setdefault(seg, {
+                "_is_file": False, "_size": None, "_mtime": None, "_children": {},
+            })
+            node = child["_children"]
+        return node
+
+    for e in entries:
+        parts = e["orig"].split("/")
+        if e["type"] == "file":
+            # 文件：父目录下挂文件节点
+            parent = tree
+            for seg in parts[:-1]:
+                child = parent.setdefault(seg, {
+                    "_is_file": False, "_size": None, "_mtime": None, "_children": {},
+                })
+                parent = child["_children"]
+            fname = parts[-1]
+            parent[fname] = {
+                "_is_file": True, "_size": e.get("size"), "_mtime": e.get("mtime"),
+                "_children": {},
             }
-            for r in rows
-        ]
+        else:
+            # 目录：确保路径存在即可
+            ensure_dir_node(parts)
 
-    def _folder_parent(self, master_key: bytes, folder_id: str) -> str:
-        with self._conn() as c:
-            r = c.execute("SELECT parent_id_enc FROM folders WHERE id=?", (folder_id,)).fetchone()
-        if not r or not r["parent_id_enc"]:
-            return ""
-        return decrypt_name(master_key, folder_id, r["parent_id_enc"])
-
-    def _folder_name(self, master_key: bytes, folder_id: str) -> str:
-        with self._conn() as c:
-            r = c.execute("SELECT name_enc FROM folders WHERE id=?", (folder_id,)).fetchone()
-        return decrypt_name(master_key, folder_id, r["name_enc"]) if r else ""
-
-    def _folder_children(self, master_key: bytes, folder_id: str) -> list[str]:
-        with self._conn() as c:
-            rows = c.execute("SELECT id, parent_id_enc FROM folders").fetchall()
+    def to_list(node: dict[str, dict]) -> list[dict]:
         out = []
-        for r in rows:
-            p = decrypt_name(master_key, r["id"], r["parent_id_enc"]) if r["parent_id_enc"] else ""
-            if p == folder_id:
-                out.append(r["id"])
+        for name in sorted(node.keys()):
+            child = node[name]
+            is_file = child.get("_is_file", False)
+            item = {
+                "name": name,
+                "type": "file" if is_file else "dir",
+                "encrypted": True,
+                "size": child.get("_size"),
+                "mtime": child.get("_mtime"),
+            }
+            if not is_file:
+                item["children"] = to_list(child.get("_children", {}))
+            out.append(item)
         return out
 
-    def rename_folder(self, master_key: bytes, folder_id: str, new_name: str) -> bool:
-        with self._conn() as c:
-            cur = c.execute(
-                "UPDATE folders SET name_enc=? WHERE id=?",
-                (encrypt_name(master_key, folder_id, new_name), folder_id),
-            )
-            return cur.rowcount > 0
-
-    def move_folder(self, master_key: bytes, folder_id: str, new_parent_id: str) -> bool:
-        """移动文件夹到新父级。防循环：目标不能是自己或自己的子孙。"""
-        if folder_id == new_parent_id:
-            return False
-        # 从 new_parent_id 往上走到根，若经过 folder_id 则构成循环
-        cur = new_parent_id
-        while cur:
-            if cur == folder_id:
-                return False
-            cur = self._folder_parent(master_key, cur)
-        with self._conn() as c:
-            cur = c.execute(
-                "UPDATE folders SET parent_id_enc=? WHERE id=?",
-                (encrypt_name(master_key, folder_id, new_parent_id or ""), folder_id),
-            )
-            return cur.rowcount > 0
-
-    def copy_folder(self, master_key: bytes, src_folder_id: str, dst_parent_id: str = "") -> str | None:
-        """递归复制文件夹（含子文件夹和文件），返回新文件夹 id。"""
-        # 防循环：目标不能是源自身或其子孙
-        cur = dst_parent_id
-        while cur:
-            if cur == src_folder_id:
-                return None
-            cur = self._folder_parent(master_key, cur)
-        src_name = self._folder_name(master_key, src_folder_id)
-        new_id = self.create_folder(master_key, src_name, dst_parent_id)
-        for f in self.list_files(master_key, src_folder_id):
-            self.copy_file(master_key, f["id"], new_id)
-        for sub in self._folder_children(master_key, src_folder_id):
-            self.copy_folder(master_key, sub, new_id)
-        return new_id
-
-    def delete_folder_for_user(self, master_key: bytes, folder_id: str) -> bool:
-        """递归删除文件夹：先删子孙文件夹（文件上浮到其父级），再删自身。"""
-        # 递归删除子文件夹
-        for sub in self._folder_children(master_key, folder_id):
-            self.delete_folder_for_user(master_key, sub)
-        # 本文件夹文件上浮到父级
-        parent = self._folder_parent(master_key, folder_id)
-        with self._conn() as c:
-            files = c.execute("SELECT id, folder_id_enc FROM files").fetchall()
-        for r in files:
-            try:
-                current = decrypt_name(master_key, r["id"], r["folder_id_enc"]) if r["folder_id_enc"] else ""
-            except Exception:
-                continue
-            if current == folder_id:
-                with self._conn() as c:
-                    c.execute(
-                        "UPDATE files SET folder_id_enc=? WHERE id=?",
-                        (encrypt_name(master_key, r["id"], parent), r["id"]),
-                    )
-        # 删除文件夹记录
-        with self._conn() as c:
-            cur = c.execute("DELETE FROM folders WHERE id=?", (folder_id,))
-            return cur.rowcount > 0
-
-    def get_record(self, file_id: str) -> dict | None:
-        with self._conn() as c:
-            r = c.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
-        return dict(r) if r else None
-
-    def get_file_path(self, file_id: str) -> str:
-        p = os.path.join(self.files_dir, file_id + ".enc")
-        if not os.path.exists(p):
-            raise FileNotFoundError(file_id)
-        return p
-
-    def thumb_path(self, file_id: str) -> str:
-        return os.path.join(self.files_dir, file_id + ".thumb.enc")
-
-    def has_thumb(self, file_id: str) -> bool:
-        return os.path.exists(self.thumb_path(file_id))
-
-    def save_thumb(self, master_key: bytes, file_id: str, jpeg_bytes: bytes) -> None:
-        """加密保存缩略图 JPEG。缩略图逻辑 id = file_id + ':thumb'。"""
-        import tempfile
-        logical_id = file_id + ":thumb"
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
-        try:
-            tmp.write(jpeg_bytes)
-            tmp.close()
-            encrypt_file(master_key, logical_id, tmp.name, self.thumb_path(file_id))
-        finally:
-            os.unlink(tmp.name)
-        with self._conn() as c:
-            c.execute("UPDATE files SET thumb=1 WHERE id=?", (file_id,))
-
-    def read_thumb(self, master_key: bytes, file_id: str) -> bytes:
-        logical_id = file_id + ":thumb"
-        return decrypt_full(master_key, logical_id, self.thumb_path(file_id))
-
-    def delete_file(self, file_id: str) -> bool:
-        with self._conn() as c:
-            cur = c.execute("DELETE FROM files WHERE id=?", (file_id,))
-            deleted = cur.rowcount > 0
-        for suffix in (".enc", ".thumb.enc"):
-            try:
-                os.remove(os.path.join(self.files_dir, file_id + suffix))
-            except OSError:
-                pass
-        return deleted
-
-    # -- 批量 / 导入 / 导出辅助 -------------------------------------------
-    def list_all_files(self, master_key: bytes) -> list[dict]:
-        """返回所有文件（含各自 folder_id），用于批量下载/离线导出。"""
-        with self._conn() as c:
-            rows = c.execute("SELECT * FROM files ORDER BY created DESC").fetchall()
-        out = []
-        for r in rows:
-            f_folder = decrypt_name(master_key, r["id"], r["folder_id_enc"]) if r["folder_id_enc"] else ""
-            out.append({
-                "id": r["id"],
-                "name": decrypt_name(master_key, r["id"], r["name_enc"]),
-                "mime": decrypt_name(master_key, r["id"], r["mime_enc"]),
-                "size": r["size"],
-                "created": r["created"],
-                "has_thumb": bool(r["thumb"]),
-                "folder_id": f_folder,
-            })
-        return out
-
-    def folder_subtree_ids(self, master_key: bytes, folder_id: str) -> list[str]:
-        """返回 folder_id 及其所有子孙文件夹 id（含自身）。"""
-        ids = [folder_id]
-        for ch in self._folder_children(master_key, folder_id):
-            ids.extend(self.folder_subtree_ids(master_key, ch))
-        return ids
-
-    def _find_child_folder(self, master_key: bytes, parent_id: str, name: str) -> str | None:
-        for cid in self._folder_children(master_key, parent_id):
-            if self._folder_name(master_key, cid) == name:
-                return cid
-        return None
-
-    def ensure_folder_path(self, master_key: bytes, parts: list[str], parent_id: str = "") -> str:
-        """按路径段逐级创建/查找文件夹（用于导入时镜像目录结构），返回叶子文件夹 id。"""
-        cur = parent_id
-        for name in parts:
-            name = (name or "").strip()
-            if not name:
-                continue
-            cur = self._find_child_folder(master_key, cur, name) or self.create_folder(master_key, name, cur)
-        return cur
+    return to_list(tree)

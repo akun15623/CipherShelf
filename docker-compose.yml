@@ -7,12 +7,10 @@ services:
     container_name: secure-vault
     restart: unless-stopped
     environment:
-      VAULT_DATA_DIR: /data
-      VAULT_IMPORT_DIR: /import    # 导入目录：放待加密的明文文件，在网页「导入」里一键加密进保险箱
-      AUTO_LOCK_SECONDS: "1800"    # 30 分钟无操作自动锁定，0 表示关闭
-      MAX_UPLOAD_MB: "4096"
+      VAULT_ROOT: /data        # 加解密操作的根目录
+      PORT: "8080"
     ports:
       - "6070:8080"
     volumes:
-      - ./vault-data:/data
-      - ./import:/import           # 可选：把 NAS 上的明文文件放到这个目录，再导入加密
+      # 把要操作的 NAS 目录挂到 /data（可挂整个数据盘，或按需挂具体目录）
+      - /vol1/1000/appData:/data

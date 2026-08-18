@@ -9,16 +9,11 @@ ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY crypto.py app.py decrypt.py ./
+COPY crypto.py app.py encrypt.py decrypt.py ./
 COPY static/ static/
 
-ENV VAULT_DATA_DIR=/data \
-    VAULT_IMPORT_DIR=/import \
-    AUTO_LOCK_SECONDS=1800 \
-    MAX_UPLOAD_MB=4096
-
-# 导入目录（放待加密的明文文件）；数据目录 + 临时目录
-RUN mkdir -p /import /data/tmp
+ENV VAULT_ROOT=/data \
+    PORT=8080
 
 EXPOSE 8080
 
