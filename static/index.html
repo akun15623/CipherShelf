@@ -243,7 +243,12 @@ const app = createApp({
         headers,
         ...opts,
       });
-      if (res.status === 401) { unlocked.value = false; throw new Error('未解锁'); }
+      if (res.status === 401) {
+        let detail = '未解锁';
+        try { detail = (await res.json()).detail || detail; } catch (e) {}
+        unlocked.value = false;
+        throw new Error(detail);
+      }
       if (!res.ok) {
         let detail = '请求失败';
         try { detail = (await res.json()).detail || detail; } catch (e) {}

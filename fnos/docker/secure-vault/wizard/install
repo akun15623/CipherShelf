@@ -8,7 +8,7 @@
         "label": "加解密密码",
         "rules": [
           { "required": true, "message": "请输入密码" },
-          { "min": 12, "message": "密码至少 12 位" }
+          { "min": 8, "message": "密码至少 8 位" }
         ]
       },
       {
