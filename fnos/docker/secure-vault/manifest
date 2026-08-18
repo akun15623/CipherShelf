@@ -1,5 +1,5 @@
 appname               = secure-vault
-version               = 1.1.1
+version               = 1.1.2
 display_name          = 文件夹加解密
 desc                  = 本地文件夹就地加解密工具：一个密码加密整个目录，目录名/文件名变密文、结构保留，解密凭密码还原。
 platform              = x86

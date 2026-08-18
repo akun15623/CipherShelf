@@ -11,7 +11,7 @@ from collections import defaultdict, deque
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
@@ -92,8 +92,15 @@ def _clear_login_failures(request: Request) -> None:
 
 def _get_session(
     vault_token: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
 ) -> dict:
-    token = vault_token or ""
+    # 优先从 Authorization: Bearer <token> 读会话（跨站 iframe 下 cookie 会被浏览器
+    # 因 SameSite 策略拒存，改用 header 认证规避），其次回退到 cookie（向后兼容）。
+    token = ""
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[7:].strip()
+    if not token:
+        token = vault_token or ""
     now = time.monotonic()
     with _sessions_lock:
         session = _sessions.get(token)
@@ -290,7 +297,7 @@ async def unlock(body: UnlockBody, request: Request, response: Response):
         COOKIE_NAME, token, httponly=True, secure=COOKIE_SECURE, samesite="strict",
         max_age=SESSION_MAX_SECONDS, path="/api",
     )
-    return {"ok": True, "initialized": initialized}
+    return {"ok": True, "initialized": initialized, "token": token}
 
 
 @app.post("/api/lock")

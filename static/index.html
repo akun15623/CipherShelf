@@ -212,6 +212,7 @@ const app = createApp({
   template: TEMPLATE,
   setup() {
     const unlocked = ref(false);
+    let authToken = null;   // 解锁后持有会话 token，走 Authorization header 认证（规避跨站 iframe 的 cookie 限制）
     const initialized = ref(null);  // null=加载中, true=已初始化(输密码), false=首次(创建密码)
     const preset = ref(false);      // 环境变量是否预设了密码（预设则直接单密码框）
     const configured = ref(null);   // null=加载中, true=已配置数据目录, false=未配置(引导去设置)
@@ -238,6 +239,7 @@ const app = createApp({
       const headers = {};
       if (opts.body) headers['Content-Type'] = 'application/json';
       if (method !== 'GET' && method !== 'HEAD') headers['X-SVault-Request'] = '1';
+      if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
       const res = await fetch(path, {
         credentials: 'include',
         headers,
@@ -269,7 +271,8 @@ const app = createApp({
         const body = needCreate.value
           ? { password: password.value, password_confirmation: confirmPassword.value }
           : { password: password.value };
-        await api('/api/unlock', { method: 'POST', body: JSON.stringify(body) });
+        const r = await api('/api/unlock', { method: 'POST', body: JSON.stringify(body) });
+        if (r.token) authToken = r.token;
         password.value = '';
         confirmPassword.value = '';
         unlocked.value = true;
@@ -280,6 +283,7 @@ const app = createApp({
 
     async function doLock() {
       try { await api('/api/lock', { method: 'POST' }); } catch (e) {}
+      authToken = null;
       unlocked.value = false;
       progress.value = null;
       encryptSel.value = [];
