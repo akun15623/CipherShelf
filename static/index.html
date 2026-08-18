@@ -164,6 +164,7 @@ const TEMPLATE = `
       <div class="tree-inner">
         <el-tree
           ref="treeRef"
+          :key="treeKey"
           :data="treeData"
           :props="treeProps"
           :load="loadNode"
@@ -223,6 +224,7 @@ const app = createApp({
     const showSingleInput = computed(() => initialized.value === true || preset.value === true);
 
     const treeRef = ref(null);
+    const treeKey = ref(0);   // 变化时强制重挂载树，触发重新懒加载
     const treeData = ref([{ name: '根目录', path: '', type: 'dir', encrypted: false }]);
     const treeProps = { label: 'name', children: 'children', isLeaf: 'isLeaf' };
     const treeEmpty = ref(false);
@@ -262,14 +264,7 @@ const app = createApp({
         password.value = '';
         confirmPassword.value = '';
         unlocked.value = true;
-        // 重新加载树
-        setTimeout(() => {
-          if (treeRef.value) {
-            const root = treeRef.value.getNode('');
-            if (root) root.loaded = false;
-            treeRef.value.store && treeRef.value.store.setData(treeData.value);
-          }
-        }, 50);
+        // 树在挂载时会通过 lazy load 自动请求根目录（loadNode 已正确处理虚拟根节点），无需手动重置
       } catch (e) { err.value = e.message; }
       finally { busy.value = false; }
     }
@@ -305,7 +300,9 @@ const app = createApp({
     }
 
     async function loadNode(node, resolve) {
-      const path = node.data ? node.data.path : '';
+      // 虚拟根节点的 data 是顶层数组而非节点对象，path 为 undefined；统一回退为根路径 ''
+      const data = node && node.data;
+      const path = (data && typeof data.path === 'string') ? data.path : '';
       try {
         const res = await api('/api/tree?path=' + encodeURIComponent(path));
         const nodes = res.nodes.map(n => addPath(n, path));
@@ -360,12 +357,8 @@ const app = createApp({
     }
 
     function refreshTree() {
-      // 重置树为初始状态，重新懒加载
-      if (treeRef.value) {
-        treeRef.value.store && treeRef.value.store.setData(treeData.value);
-        const root = treeRef.value.getNode('');
-        if (root) root.loaded = false;
-      }
+      // 通过 key 变化强制重挂载树，重新走懒加载（根目录重新请求）
+      treeKey.value += 1;
     }
 
     function fmtSize(n) {
@@ -386,7 +379,7 @@ const app = createApp({
 
     return {
       unlocked, initialized, preset, configured, needCreate, showSingleInput, password, confirmPassword, busy, err,
-      treeRef, treeData, treeProps, treeEmpty,
+      treeRef, treeKey, treeData, treeProps, treeEmpty,
       progress, encryptSel, decryptSel,
       doUnlock, doLock, loadNode, onCheck, doEncrypt, doDecrypt, fmtSize,
     };
