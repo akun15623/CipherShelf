@@ -7,12 +7,12 @@
   <link rel="stylesheet" href="/static/element-plus.css">
   <style>
     :root {
-      --bg: #0f1420;
-      --card: #1a2130;
-      --card-hover: #232b3d;
-      --border: #262f42;
-      --text: #e6e8ee;
-      --text-dim: #8a93a6;
+      --bg: #f5f7fa;
+      --card: #ffffff;
+      --card-hover: #f0f2f5;
+      --border: #e4e7ed;
+      --text: #303133;
+      --text-dim: #909399;
       --accent: #409eff;
       --danger: #f56c6c;
     }
@@ -31,6 +31,8 @@
     .lock-card {
       width: 100%; max-width: 400px; background: var(--card); border-radius: 16px;
       padding: 40px 32px; text-align: center;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
+      border: 1px solid var(--border);
     }
     .lock-icon { font-size: 52px; margin-bottom: 8px; }
     .lock-title { font-size: 21px; font-weight: 700; margin-bottom: 4px; }
@@ -79,7 +81,7 @@
     @media (max-width: 768px) {
       .bottombar {
         position: fixed; bottom: 0; left: 0; right: 0; z-index: 100;
-        background: rgba(26, 33, 48, 0.9);
+        background: rgba(255, 255, 255, 0.92);
         backdrop-filter: blur(10px);
         -webkit-backdrop-filter: blur(10px);
       }
