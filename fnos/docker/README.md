@@ -32,17 +32,19 @@ fnos/docker/
 | 文件 | 说明 |
 |------|------|
 | `secure-vault/secure-vault.fpk` | 应用包（约 9 KB，可安装）|
-| `secure-vault-image.tar` | Docker 镜像导出（约 158 MB，`docker load` 导入）|
+| `secure-vault-image.tar` | 镜像离线导出（可选兜底，线上模式不需要）|
 
-## 安装前提（重要）
+## 安装前提
 
-本应用 compose 使用**本地镜像** `secure-vault:latest`（`pull_policy: never`，不去外网拉取），**飞牛设备上必须先有该镜像**：
+本应用 compose 使用**线上公开镜像**：
 
-```bash
-docker load -i secure-vault-image.tar
+```
+crpi-dberwpbq5bud3kxp.cn-chengdu.personal.cr.aliyuncs.com/akun15623/secure-vault:latest
 ```
 
-导入后确认 `docker images secure-vault` 能看到 `secure-vault:latest`（约 160MB）。
+该镜像在阿里云 ACR 上**公开**，安装时飞牛会**自动拉取**，无需预先 `docker load`。仅需保证设备能访问公网（阿里云 ACR 国内直连快、稳定）。
+
+> 离线兜底：若设备无法访问公网，仍可 `docker load -i secure-vault-image.tar` 导入同版本镜像，再手动 `docker tag` 成上述完整地址即可（`.gitignore` 已忽略该 tar，需自行构建导出）。
 
 ## 安装与使用
 
@@ -58,6 +60,7 @@ docker load -i secure-vault-image.tar
 | 项 | 值 |
 |----|----|
 | 应用名 | secure-vault（显示名：文件夹加解密）|
+| 镜像 | `crpi-dberwpbq5bud3kxp.cn-chengdu.personal.cr.aliyuncs.com/akun15623/secure-vault:latest`（阿里云 ACR，公开）|
 | 服务端口 | 8090（宿主机）→ 8080（容器）|
 | 平台 | x86 |
 | 数据目录 | 安装向导配置（`wizard_data_path` 挂载到容器 `/data`）|

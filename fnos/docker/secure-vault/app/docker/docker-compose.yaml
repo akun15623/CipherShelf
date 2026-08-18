@@ -1,7 +1,6 @@
 services:
   secure-vault:
-    image: secure-vault:latest
-    pull_policy: never
+    image: crpi-dberwpbq5bud3kxp.cn-chengdu.personal.cr.aliyuncs.com/akun15623/secure-vault:latest
     container_name: secure-vault
     restart: unless-stopped
     ports:
