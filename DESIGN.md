@@ -2,9 +2,9 @@
 
 | 项目 | 内容 |
 |------|------|
-| 文档版本 | v1.0 |
+| 文档版本 | v1.1 |
 | 状态 | 待评审 |
-| 日期 | 2026-08-17 |
+| 日期 | 2026-08-18 |
 | 目标产品 | 文件夹就地加解密工具（替代原加密网盘） |
 
 ---
@@ -37,7 +37,7 @@ secure-vault 原为「自托管加密网盘」，具备多层级目录、文件�
 ┌─────────────┐      ┌──────────────────────────┐      ┌──────────────┐
 │  Web 前端     │ HTTP │  FastAPI (app.py)         │ 调用  │  crypto.py    │
 │  上下结构单页 │ ───▶ │  unlock/tree/encrypt/    │ ───▶ │  单密钥核心   │
-│  (Vue3+EP)   │      │  decrypt/progress        │      │  (纯函数库)   │
+│  (Vue3+EP)   │      │  decrypt/progress        │      │  无状态核心库  │
 └─────────────┘      └──────────────────────────┘      └──────┬───────┘
                                                               │
 ┌─────────────┐      ┌──────────────────────────┐              │
@@ -46,7 +46,7 @@ secure-vault 原为「自托管加密网盘」，具备多层级目录、文件�
 └─────────────┘      └──────────────────────────┘
 ```
 
-- `crypto.py` 是**无状态纯函数库**：输入（路径 + 密码）→ 输出（密文/明文），不依赖数据库、不持有会话。
+- `crypto.py` 是**无状态核心库**：输入（路径 + 密钥/密码）→ 操作文件并返回结果，不依赖数据库、不持有会话。由于它包含文件系统读写，不能称为数学意义上的纯函数；可测试的格式编解码与路径校验应尽量拆成无副作用函数。
 - `app.py` 负责 Web 会话、目录树懒加载、任务调度；`encrypt.py`/`decrypt.py` 是 CLI 薄壳。
 - 三处共用同一 `crypto.py`，保证 Web 与 CLI 加密结果**完全一致、可互换**。
 
@@ -55,10 +55,11 @@ secure-vault 原为「自托管加密网盘」，具备多层级目录、文件�
 ## 3. 密钥模型：单密钥（固定 salt）
 
 ```
-password ──PBKDF2-HMAC-SHA256(DEFAULT_SALT, 600000)──▶ master_key (32 B)
+password ──PBKDF2-HMAC-SHA256(DEFAULT_SALT, iterations)──▶ master_key (32 B)
 ```
 
 - `DEFAULT_SALT`：代码内置常量（16 字节），**固定不变**，保证「同一密码 = 同一密钥」。
+- `iterations`：格式 v1 固定为 600000，并写入 `.svault` 明文头、绑定到索引 AAD。解密端先读头再派生密钥；v1 遇到其他值直接拒绝。未来调整 KDF 参数必须提升格式版本并提供显式迁移，不能让每次命令自由改变，否则“同一密码 = 同一密钥”不成立。
 - 所有文件内容、目录名/文件名、索引，全部由这**同一个 master_key** 派生加密。
 - 无 per-file 独立密钥、无 vault.db、无二次封装。
 
@@ -72,7 +73,7 @@ password ──PBKDF2-HMAC-SHA256(DEFAULT_SALT, 600000)──▶ master_key (32 
 索引的 GCM 认证标签天然就是「密码校验器」，省去 verifier 字段。
 
 ### 3.2 安全权衡（已确认接受）
-固定 salt 意味着「谁用同一个密码，就能互相解密」。这是「都用一个密钥」心智的直接代价。缓解：60 万次 PBKDF2 提高暴力成本 + 强密码要求（前端/CLI 提示 ≥ 8 位）。
+固定 salt 意味着「谁用同一个密码，就能互相解密」。这是「都用一个密钥」心智的直接代价。缓解：默认 60 万次 PBKDF2 提高暴力成本 + 强密码要求（前端/CLI 提示 ≥ 8 位）。同一个 `VAULT_ROOT` 下的所有加密目录必须使用同一密码；Web 解锁后遇到不能被当前密钥验证的索引时必须标记错误并拒绝操作，不得把它当作普通目录。
 
 ---
 
@@ -106,16 +107,27 @@ password ──PBKDF2-HMAC-SHA256(DEFAULT_SALT, 600000)──▶ master_key (32 
 
 ```
 偏移     大小   字段
-0        4      magic  = "SVLT" (ASCII)
+0        4      magic = "SVLT" (ASCII)
 4        1      version = 1
 5        4      chunk_size (uint32 BE) = 1048576
-9        4      block_count (uint32 BE)   ← 块数，便于校验完整性
-13       ...    数据块序列
-每个块:  [nonce 12B][ciphertext + GCM tag 16B]
-        AAD = b"SVLT" + version(1B) + block_index(8B BE)
+9        8      block_count (uint64 BE)
+17       16     file_id（随机 UUID 原始字节）
+33       12     header_nonce（随机）
+45       16     header_tag（AES-GCM 空明文认证标签）
+61       ...    数据块序列
+
+base_header = magic + version + chunk_size + block_count + file_id
+header_tag = AES-GCM(master_key, header_nonce, plaintext=b"",
+                     AAD=base_header + b"file-header")
+
+每个块: [nonce 12B][ciphertext + GCM tag 16B]
+AAD = base_header + b"block" + block_index(8B BE)
 ```
 
-- 空文件：`block_count = 0`，无数据块，仅头部（可识别且不可伪造）。
+- `file_id` 同时保存在加密索引对应条目中；解密时必须检查文件头与索引一致。这样即使所有文件共用 master key，也不能把一个文件的密文块或整份密文替换到另一个文件。
+- 文件头全部绑定到 `header_tag`，篡改 `chunk_size`、`block_count` 或 `file_id` 都会认证失败。
+- 空文件：`block_count = 0`，无数据块，但仍必须验证 `header_tag`，因此空文件也可认证。
+- 每个 header 和数据块都必须使用 CSPRNG 生成独立 96-bit nonce；实现不得复用 nonce。
 - 单密钥直接加密文件内容，无 per-file key 二次封装。
 
 ### 4.3 索引文件 `.svault`（放在加密根目录）
@@ -128,15 +140,16 @@ password ──PBKDF2-HMAC-SHA256(DEFAULT_SALT, 600000)──▶ master_key (32 
   "version": 1,
   "entries": [
     {"type": "dir",  "orig": "2024",          "enc": "9f3a2c7e..."},
-    {"type": "file", "orig": "2024/旅行.jpg",  "enc": "c7e2f0a9...", "size": 12345,      "mtime": 1710000000},
+    {"type": "file", "orig": "2024/旅行.jpg",  "enc": "9f3a2c7e.../c7e2f0a9...", "file_id": "d8d50e...", "size": 12345, "mtime": 1710000000},
     {"type": "dir",  "orig": "2025",          "enc": "a3d6b8f1..."},
-    {"type": "file", "orig": "2025/视频.mp4",  "enc": "5e9c2b7a...", "size": 987654321,  "mtime": 1710000002}
+    {"type": "file", "orig": "2025/视频.mp4",  "enc": "a3d6b8f1.../5e9c2b7a...", "file_id": "8c2127...", "size": 987654321, "mtime": 1710000002}
   ]
 }
 ```
 
 - `orig`：原相对路径（仅解密后出现在内存，落盘只有密文）。
-- `enc`：密文相对路径。
+- `enc`：相对加密根目录的**完整密文路径**；文件条目必须包含其密文父目录，目录条目按父目录优先排列。
+- `file_id`：每个文件随机生成的 128-bit 标识，采用 32 位小写 hex，必须与密文文件头一致，并参与文件头和块 AAD。
 - `size` / `mtime`：文件元数据（用于还原时间戳、树显示大小）。
 
 **落盘加密格式**（整个 JSON 用 master_key AES-GCM 加密）：
@@ -145,10 +158,16 @@ password ──PBKDF2-HMAC-SHA256(DEFAULT_SALT, 600000)──▶ master_key (32 
 偏移  大小  字段
 0     4     magic = "SVLT"
 4     1     version = 1
-5     12    nonce (随机)
-17    ...   ciphertext + GCM tag 16B
-            AAD = b"SVLT" + version(1B) + b"index"
+5     1     kdf_id = 1（PBKDF2-HMAC-SHA256）
+6     4     iterations (uint32 BE)
+10    12    nonce（随机）
+22    ...   ciphertext + GCM tag 16B
+
+index_header = magic + version + kdf_id + iterations
+AAD = index_header + b"index"
 ```
+
+解密端只接受支持的 `version`、`kdf_id`；格式 v1 的 `iterations` 必须严格等于 600000，避免恶意头部造成资源耗尽或产生多个主密钥。索引解密后必须校验 JSON schema、条目唯一性、`orig`/`enc` 路径安全性、`file_id` 格式以及文件/目录类型关系，不能只依赖 GCM 成功。
 
 ---
 
@@ -159,40 +178,50 @@ password ──PBKDF2-HMAC-SHA256(DEFAULT_SALT, 600000)──▶ master_key (32 
 ```
 输入: root_dir（绝对路径）, password
 1. 派生 master_key
-2. 扫描: os.walk 收集所有文件（稳定排序），统计总字节数（用于进度）
-3. 对每个文件:
-   a. 生成密文名 enc = uuid4().hex
-   b. 分块加密写入临时文件 <enc>.tmp（流式，1 MiB/块）
-   c. 记录 entry {type:file, orig, enc, size, mtime}
-4. 对每个子目录: 生成密文目录名 enc，记录 entry {type:dir, orig, enc}
-5. 全部文件加密成功后:
-   a. 所有 <enc>.tmp 重命名为 <enc>（正式密文）
-   b. 按 enc 目录结构创建密文目录、移动密文文件
-   c. 加密索引 JSON → 写 .svault
-6. 全部成功后 → 删除原明文文件 + 原明文空目录
-7. 任何一步失败 → 删除已生成的 .tmp 密文，保留明文（不丢数据）
+2. 扫描: os.walk 收集所有文件（稳定排序），统计总字节数（用于进度）；跳过符号链接，并拒绝已有 `.svault`、事务目录或保留文件名冲突
+3. 在 root_dir 同一文件系统的父目录创建 staging_dir 和事务日志 `.svault-txn-<uuid>.json`
+4. 对每个子目录（父目录优先）生成密文名、建立完整 orig→enc 映射，并在 staging_dir 创建密文目录
+5. 对每个文件:
+   a. 生成密文名 enc = uuid4().hex 和 file_id = uuid4()
+   b. 分块加密写入临时文件 <enc>.tmp-<uuid>（流式，1 MiB/块）
+   c. 验证并重命名为 staging_dir 内的正式密文
+   d. 记录 entry {type:file, orig, enc, file_id, size, mtime}
+6. 全部文件加密成功后:
+   a. 加密索引 JSON → 原子写入 staging_dir/.svault
+   b. fsync 已生成文件、staging_dir 和事务日志（平台支持时）
+   c. 事务日志阶段标记为 `staged`
+7. 提交切换（均在同一父目录、同一文件系统）:
+   a. 事务阶段写为 `source_move_started` 并 fsync，再将 root_dir 重命名为 backup_dir、fsync 父目录，随后写为 `source_moved`
+   b. 事务阶段写为 `commit_started` 并 fsync，再将 staging_dir 重命名为 root_dir、fsync 父目录，随后写为 `committed`
+   c. 确认新 root_dir 可解索引且文件清单完整后，写为 `cleanup_started`，删除 backup_dir，最后删除事务日志
+8. 提交前失败 → 删除 staging_dir，保留原 root_dir；提交期间崩溃 → 下次启动按事务日志恢复或完成切换，任何阶段都至少保留一份完整副本
 ```
 
 ### 5.2 解密（还原）
 
 ```
 输入: root_dir（含 .svault）, password, output_dir(可选，默认原地)
-1. 派生 master_key
-2. 解密 .svault → 得到索引 entries（GCM 失败 = 密码错，立即返回）
-3. 路径安全校验（见 §9）: 每个 orig 规范化后必须仍在目标根内，拒绝 ../ 绝对路径 符号链接
-4. 对每个 file entry:
-   a. 读 <enc> 密文 → 分块解密 → 写入目标临时目录
+1. 读取并校验 `.svault` 明文头中的 version / KDF 参数，再派生 master_key
+2. 解密 `.svault` → 得到索引 entries（GCM 失败 = 密码错或索引损坏，立即返回，不碰任何文件）
+3. 完整校验索引 schema、重复路径、file_id、路径边界和磁盘对象类型（见 §9）
+4. 在最终目标同一文件系统创建临时输出目录，对每个 file entry:
+   a. 校验密文文件头及 file_id → 分块解密 → 写入临时输出
    b. 还原 mtime
 5. 全部文件解密成功后:
-   a. 临时目录内容移动到最终位置（重建 orig 目录结构）
-   b. 删除密文文件 + 密文目录 + .svault
-6. 失败 → 删除临时输出，保留密文
+   a. `output_dir` 未指定（原地解密）：使用与加密相同的事务日志、backup_dir 和目录切换流程；验证明文后才删除密文备份
+   b. `output_dir` 已指定：目标必须不存在，原子移动临时输出到目标，**保留原密文目录**
+6. 目标已存在、目标跨文件系统或无法保证安全切换时 → 拒绝，不覆盖
+7. 失败 → 删除临时输出；若处于提交阶段则按事务日志恢复，始终保留完整密文或完整明文之一
 ```
 
 ### 5.3 原子性保证
-- **加密**：先全部加密成功 → 最后统一删明文。中途失败不丢明文。
-- **解密**：先全部解密到临时目录 → 最后统一替换 + 删密文。中途失败不丢密文。
-- 临时文件用 `.tmp-<uuid>` 后缀，避免与正式密文混淆。
+- **加密**：完整密文树先写入同文件系统 staging，目录级切换后才清理明文 backup。
+- **原地解密**：完整明文树先写入同文件系统 staging，目录级切换后才清理密文 backup。
+- **解密到其他目录**：成功写入目标后仍保留原密文，避免“导出”意外变成破坏性操作。
+- 临时文件、staging、backup 和事务日志都带随机 UUID，并使用保留前缀；扫描时必须排除。
+- 服务和 CLI 每次启动先扫描未完成事务。恢复逻辑必须同时检查事务阶段以及 root/staging/backup 三个路径的实际存在状态，阶段只作为意图提示，不能作为唯一依据。恢复时先验证候选副本完整性，再选择恢复 backup 或完成 staging 提交；任何删除前必须证明还有另一份已验证的完整副本。无法唯一判断时停止并要求人工处理，绝不自动删除。
+- 事务日志不得包含密码或密钥，文件权限限制为当前服务用户；每次阶段更新采用“写临时文件 → fsync → 原子替换 → fsync 父目录”。
+- “原子性”在本文中指崩溃后可恢复且不丢失最后一份完整数据；两次目录重命名之间可能短暂不可见，不承诺跨文件系统原子替换。
 
 ---
 
@@ -201,7 +230,6 @@ password ──PBKDF2-HMAC-SHA256(DEFAULT_SALT, 600000)──▶ master_key (32 
 ```bash
 # 加密（密码交互输入，不回显）
 python3 encrypt.py /data/照片
-python3 encrypt.py /data/照片 --iterations 600000
 
 # 解密（自动发现目录下 .svault；默认就地还原）
 python3 decrypt.py /data/照片
@@ -209,11 +237,11 @@ python3 decrypt.py /data/照片 -o /restore/照片
 
 # 公共参数
 --password <pwd>    # 明文密码（不推荐，会留 shell 历史；缺省 getpass 交互）
---iterations <n>    # PBKDF2 迭代次数（默认 600000）
 --yes               # 跳过确认提示
 ```
 
 - 密码用 `getpass` 交互输入：不回显、不进日志、不写 shell 历史。
+- 加密固定使用格式 v1 的 600000 次迭代；解密从 `.svault` 读取并严格验证 KDF 参数，不提供命令行覆盖。
 - 加密/解密前打印操作摘要（目录、文件数、总大小），`--yes` 跳过二次确认。
 - 退出码：`0` 成功、`1` 操作失败、`2` 参数错误、`3` 密码错误。
 
@@ -255,6 +283,7 @@ python3 decrypt.py /data/照片 -o /restore/照片
 6. **按钮**：
    - `加密选中`：对选中的**未加密**目录就地加密。
    - `解密选中`：对选中的**已加密**目录还原。
+   - 同一次提交中若同时选择父目录和其子目录，前端合并为父目录；后端仍必须再次拒绝重叠路径。
 7. **进度条**：轮询 `/api/progress`，显示百分比 + 当前字节数。
 8. **锁定**：清除会话密钥，回到解锁界面。
 
@@ -287,24 +316,31 @@ python3 decrypt.py /data/照片 -o /restore/照片
 
 ## 8. 后端 API 规格
 
-统一前缀 `/api`，会话用 `httpOnly` cookie（token 不暴露给 JS）。
+统一前缀 `/api`，会话使用 256-bit CSPRNG 生成的不透明随机 token，通过 `httpOnly` cookie 保存，token 不暴露给 JS。服务端会话只在内存保存 master key，进程重启即失效：
+
+- Cookie：`HttpOnly`、`SameSite=Strict`、有限 `Path`，生产 HTTPS 下必须 `Secure`；空闲 30 分钟或最长 8 小时后失效。
+- 状态变更接口只接受同源请求：关闭 CORS，校验 `Origin`（无 Origin 时校验 `Referer`），并要求自定义头 `X-SVault-Request: 1`。
+- `/api/lock`、会话过期和服务关闭时删除会话引用并尽力清理密钥缓冲；Python 运行时不能承诺可靠内存擦除，文档不得声称已物理清零。
+- API 日志禁止记录密码、Cookie、绝对文件名和请求体；错误响应不得回显服务器绝对路径。
+- 同一时刻仅允许一个磁盘变更任务；任务队列必须拒绝重叠路径，避免父子目录或两个会话同时修改同一数据。
+- Web API 中的所有 `path`、`paths`、`output` 都使用相对 `VAULT_ROOT` 的 `/` 分隔路径；绝对路径一律拒绝。绝对路径只存在于后端内部和 CLI，不返回浏览器。
 
 ### 8.1 `POST /api/unlock`
 ```json
 请求: { "password": "..." }
 成功: { "ok": true }
-失败: 401 { "detail": "密码错误" }
+失败: 401 { "detail": "密码错误或索引损坏" }
 ```
 > 注意：固定 salt 模型下，「密码错误」只有在真正解密某处时才能判定。
-> 但为了进入即校验，后端可对 `VAULT_ROOT` 下**任意一个已加密目录的索引**尝试解密；
-> 若根下无任何加密内容，则密码正确与否无法即时判定——此时直接放行（进入后树展开时才可能报错）。
+> 后端应发现 `VAULT_ROOT` 下的加密根（遇到 `.svault` 后不再进入其密文子目录），派生一次 master key，并验证所有发现的索引；任一索引认证或 schema 校验失败都不创建会话，统一返回“密码错误或索引损坏”。
+> 若根下无任何加密内容，则密码无法即时验证，此时允许创建空会话；该会话首次加密会建立此工作区的数据。格式 v1 的 KDF 参数固定，因此所有目录共用同一派生密钥。
 
 ### 8.2 `POST /api/lock`
 ```
 → 清除会话密钥，返回 { "ok": true }
 ```
 
-### 8.3 `GET /api/tree?path=<相对或绝对路径>`
+### 8.3 `GET /api/tree?path=<相对路径>`
 ```json
 响应: {
   "path": "照片",
@@ -321,16 +357,22 @@ python3 decrypt.py /data/照片 -o /restore/照片
 
 ### 8.4 `POST /api/encrypt`
 ```json
-请求: { "paths": ["/data/照片", "/data/视频合集"] }
+请求: { "paths": ["照片", "视频合集"] }
 成功: { "task_id": "..." }
-失败: 400 { "detail": "..." }   // 目录不存在 / 已加密 / 无权限
+失败: 400 { "detail": "..." }   // 目录不存在 / 已加密 / 无权限 / 路径重叠
 ```
 
 ### 8.5 `POST /api/decrypt`
 ```json
-请求: { "paths": ["/data/照片"], "output": null }
+请求: { "paths": ["照片"], "output": null }
 成功: { "task_id": "..." }
 ```
+
+- `output = null` 表示原地事务切换，成功后清理密文备份。
+- 指定 `output` 表示导出式解密，目标必须不存在，成功后仍保留原密文。
+- 操作路径必须是 `VAULT_ROOT` 的严格子目录，不能直接选择 `VAULT_ROOT` 挂载点本身；否则无法安全执行同父目录重命名。
+- `paths` 和 `output` 都必须位于 `VAULT_ROOT` 内，且 output 不得与源目录重叠。
+- 多路径请求不得互为父子路径。
 
 ### 8.6 `GET /api/progress/{task_id}`
 ```json
@@ -353,17 +395,24 @@ python3 decrypt.py /data/照片 -o /restore/照片
 | 密码泄露 | Web 交互输入、服务端不落盘不进日志；CLI `getpass` 不回显；建议 HTTPS |
 | 元数据泄露 | 文件名/目录名 = 随机 32 位 hex、无扩展名；索引整体加密 |
 | 路径穿越（恶意索引/密文）| 解密时 `os.path.realpath` 规范化，拒绝 `../`、绝对路径、符号链接、越界 |
-| 密文块篡改/重排 | GCM tag + AAD 绑定 `(magic, version, block_index)` |
+| 密文块篡改/重排/跨文件替换 | GCM tag + AAD 绑定完整文件头、`file_id` 和 `block_index`；索引认证 file_id 与密文路径 |
+| 空文件或文件头伪造 | 独立 `header_nonce` + `header_tag` 认证完整头部，空文件也必须验证 |
+| 恶意 KDF 参数耗尽资源 | 解密前验证 kdf_id，并要求格式 v1 的 iterations 严格等于 600000，再执行密钥派生 |
 | 密码暴力破解 | 60 万次 PBKDF2 提高成本；强密码提示 |
-| 加密中途失败丢数据 | 先全部加密成功 → 最后统一删明文（见 §5.3） |
+| 加密中途失败或崩溃丢数据 | 同文件系统 staging + backup + 事务日志，启动时恢复（见 §5.3） |
 | Web 越权访问 NAS 路径 | 容器只挂载 `VAULT_ROOT`，路径校验拒绝根外访问 |
 | 符号链接逃逸 | 加密时跳过符号链接不跟随；解密拒绝还原符号链接 |
+| Cookie 会话被跨站调用 | SameSite=Strict、同源 Origin/Referer 校验、自定义请求头、关闭 CORS |
 
 ### 路径穿越防护细则（解密时）
 对索引中每个 `orig`：
 1. `os.path.normpath(orig)` 后不得以 `../` 开头、不得为绝对路径。
-2. `os.path.realpath(join(output_dir, orig))` 必须位于 `realpath(output_dir)` 前缀内。
-3. `entry.type == "file"` 但实际指向目录（或反之）→ 拒绝。
+2. 拒绝空路径、`.`、NUL、平台保留名和重复规范化路径；Windows 下比较时执行大小写归一化。
+3. 使用 `os.path.commonpath([target, root]) == root` 判断边界，**不得**用字符串 `startswith`，避免 `/data/a` 错误匹配 `/data/ab`。
+4. 从根目录开始用 `lstat` 逐级检查所有已存在路径组件，任何符号链接或 reparse point 都拒绝；对尚不存在的叶子也必须先验证最近的已存在父目录。
+5. 对索引中的 `enc` 执行相同边界检查，并要求磁盘对象类型与 `entry.type` 一致。
+6. `file_id`、`orig`、`enc` 必须唯一；文件头 file_id 必须与索引一致；索引中的父子层级必须闭合。
+7. 路径校验通过后到实际打开文件之间仍可能发生竞态；支持的平台优先使用目录句柄相对打开、`O_NOFOLLOW` 等机制。无法消除竞态的平台必须保证服务独占操作根目录，并在提交前再次校验。
 
 ---
 
@@ -371,13 +420,15 @@ python3 decrypt.py /data/照片 -o /restore/照片
 
 | 场景 | 行为 |
 |------|------|
-| 密码错误 | 401 / CLI exit 3，不碰任何文件 |
+| 密码错误或索引认证失败 | 401 / CLI exit 3，统一提示“密码错误或索引损坏”，不碰任何数据文件，避免泄露判定细节 |
 | 目录不存在 | 400，提示 |
 | 目录已加密（再次加密）| 400，提示「该目录已加密」 |
 | 目录无索引（解密）| 400，提示「未找到 .svault」 |
-| 密文损坏 / 篡改 | 解密报「认证失败」，保留密文与已解出的临时文件 |
+| 密文损坏 / 篡改 | 解密报「认证失败」，删除临时输出并保留全部密文 |
 | 磁盘空间不足 | 捕获 OSError，回滚临时文件，提示 |
 | 路径越界 | 403 / 拒绝 |
+| 输出目标已存在或同名冲突 | 409 / 拒绝，默认不覆盖任何现有文件 |
+| 发现未完成事务 | 先按事务阶段恢复；状态不明确时停止服务/CLI 并提示人工处理，不自动删除 |
 
 ---
 
@@ -412,6 +463,8 @@ services:
 
 - 容器只挂载 `VAULT_ROOT`，前端只能操作该目录树。
 - 需要操作哪个 NAS 目录，就在 compose 里把对应宿主目录挂到 `/data` 下（或整个 appData 挂进去）。
+- 生产环境必须通过同源 HTTPS 反向代理访问，不直接把 6070 暴露到不可信网络；代理需保留 `Origin`/`Host`，限制请求体大小，并设置合理的读写超时。
+- staging、backup 和事务日志必须创建在目标目录同一挂载点；检测到跨设备移动（`EXDEV`）时直接拒绝，不能退化为复制后删除。
 
 ---
 
@@ -419,7 +472,8 @@ services:
 
 | 文件 | 动作 |
 |------|------|
-| `crypto.py` | 重写：单密钥 + 就地加密 + 索引（删 SQLite Vault、per-file key、缩略图、Range） |
+| `crypto.py` | 重写：单密钥 + file_id 绑定 + 可认证文件头/分块 + 加密索引（删 SQLite Vault、per-file key、缩略图、Range） |
+| `transaction.py` | 新增：同文件系统 staging/backup、事务日志、崩溃恢复和提交前后二次校验 |
 | `encrypt.py` | 新增 CLI |
 | `decrypt.py` | 重写：读索引还原 |
 | `app.py` | 重写：unlock/lock/tree/encrypt/decrypt/progress（删网盘全部功能） |
@@ -436,15 +490,21 @@ services:
 
 1. **单元测试**
    - 加解密回环：中文文件名、空目录、空文件、深层嵌套、大文件（2 GB+ 流式）
-   - 篡改检测：翻转密文块 1 bit → 解密报认证失败
+   - 篡改检测：翻转文件头/密文块 1 bit → 解密报认证失败；空文件头同样必须失败
+   - 跨文件替换：交换两个文件的整份密文或相同 block_index 的块 → file_id/AAD 校验失败
    - 错误密码 → 拒绝
+   - KDF 头：非法 kdf_id、非 600000 iterations、未知版本 → 派生前拒绝
    - 路径穿越：构造含 `../` / 绝对路径的恶意索引 → 拒绝
-   - 符号链接：加密跳过、解密拒绝
+   - 路径边界：`/data/a` 不得匹配 `/data/ab`；大小写、保留名、重复规范化路径均覆盖
+   - 符号链接/reparse point：加密跳过，解密和提交拒绝，并覆盖校验后替换的竞态场景
    - mtime 还原正确
 2. **CLI 端到端**：`encrypt.py` → `decrypt.py` 回环，内容 md5 一致
-3. **Web 端到端**：真实浏览器解锁 → 树懒加载 → 已加密目录显示原名+🔒 → 多选加密 → 进度条 → 解密还原
-4. **响应式**：PC（1280px）+ 移动端（375px）布局、固定底栏、触控区、密码框字号
-5. **部署**：重建镜像 → 容器 6070 → 挂载测试目录 → 全流程验证
+3. **事务故障注入**：在 staged、source_move_started、source_moved、commit_started、committed、cleanup_started 各阶段强制终止进程，重启后恢复；任何阶段至少保留一份完整数据
+4. **输出策略**：独立 output 解密后保留密文；目标已存在、同名冲突、跨文件系统、父子路径重叠均拒绝
+5. **Web 端到端**：真实浏览器解锁 → 树懒加载 → 已加密目录显示原名+🔒 → 多选加密 → 进度条 → 解密还原
+6. **Web 安全**：跨站 Origin、无自定义头、过期 Cookie、并发重叠任务均拒绝；日志不包含密码/Cookie/绝对路径
+7. **响应式**：PC（1280px）+ 移动端（375px）布局、固定底栏、触控区、密码框字号
+8. **部署**：重建镜像 → 容器 6070 → 挂载测试目录 → 全流程验证
 
 ---
 
@@ -454,8 +514,10 @@ services:
 |------|------|------|
 | 固定 salt 导致同密码互解 | 中 | 已确认接受；强密码 + 高迭代 |
 | 忘密码 = 数据永久不可读 | 高 | README 醒目提示；无找回后门是设计使然 |
-| 加密后忘记删明文 | 中 | CLI 提供 `--delete-source`（本设计加密即删明文，但保留可选输出副本） |
-| 索引损坏 = 全目录无法还原 | 高 | 索引是单点，建议 README 提示备份 `.svault` |
+| 提交中断后 backup 暂留明文 | 高 | 事务恢复优先恢复/完成切换；验证 committed 后才清理，并向用户明确报告未完成事务 |
+| 索引损坏 = 全目录无法还原 | 高 | 索引是单点；备份时必须备份整个加密目录（`.svault` 与密文必须同一版本），不能只复制索引 |
+| 同密钥下跨文件密文替换 | 高 | 随机 file_id 同时绑定加密索引、文件头和每个块 AAD |
+| 目录切换短暂不可见 | 中 | 同文件系统重命名 + 事务日志恢复；不宣称两次 rename 是单操作原子替换 |
 | 大目录索引过大 | 低 | 单密钥方案固有；非目标场景 |
 
 ---
@@ -471,3 +533,19 @@ services:
 | 5 | 预览 | 不支持预览，已加密内容显示原文件名 + 🔒 标记 |
 | 6 | 进入方式 | 前端进入需输密码，密码即密钥 |
 | 7 | 设备适配 | PC + 移动端响应式（同一上下结构） |
+| 8 | 文件身份绑定 | 每个文件随机 file_id，绑定索引、文件头和所有块 AAD，防止跨文件替换 |
+| 9 | KDF 参数 | 格式 v1 固定 PBKDF2-HMAC-SHA256 / 600000 次，参数写入索引头但不可自由覆盖 |
+| 10 | 崩溃一致性 | 同文件系统 staging + backup + 事务日志，可恢复，不承诺跨文件系统原子切换 |
+| 11 | 独立目录解密 | 视为导出，成功后保留原密文；只有原地解密才在验证后清理密文 backup |
+
+---
+
+## 17. v1.1 评审修订摘要
+
+1. 文件格式增加 `file_id`、可认证文件头，并把完整文件身份绑定到每个块 AAD，修复同密钥下跨文件替换与空文件不可认证问题。
+2. `.svault` 头增加 KDF 标识和迭代次数；格式 v1 固定 600000 次，删除可造成多主密钥的自由覆盖参数。
+3. 就地操作改为同文件系统 staging + backup + 持久化事务日志，明确崩溃恢复规则和“可恢复原子性”的边界。
+4. 独立 output 改为非破坏性导出：目标必须不存在，成功后保留原密文。
+5. 路径校验改用 `commonpath`、逐级 `lstat`/reparse point 检查和提交前复验，禁止字符串前缀判断。
+6. 补充 Web Cookie 生命周期、同源/CSRF 防护、日志脱敏、串行任务与父子路径冲突控制。
+7. 扩充篡改、跨文件替换、非法 KDF、事务故障注入、输出冲突和 Web 安全测试。
