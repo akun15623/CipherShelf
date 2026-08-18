@@ -24,6 +24,8 @@ import crypto
 
 VAULT_ROOT = os.environ.get("VAULT_ROOT", "/data")
 PORT = int(os.environ.get("PORT", "8080"))
+# 可选：环境变量预设初始密码。设了则解锁时直接比对（不再走「创建密码」流程）。
+PRESET_PASSWORD = os.environ.get("VAULT_PASSWORD") or None
 
 app = FastAPI(title="Secure Vault", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -86,8 +88,11 @@ async def index():
 # ---------------------------------------------------------------------------
 @app.get("/api/status")
 async def status():
-    """报告工作区是否已初始化（无需会话）。未初始化时前端显示创建密码流程。"""
-    return {"initialized": crypto.is_initialized(VAULT_ROOT)}
+    """报告工作区状态（无需会话）。preset=true 表示环境变量预设了密码，前端显示单密码框。"""
+    return {
+        "initialized": crypto.is_initialized(VAULT_ROOT),
+        "preset": PRESET_PASSWORD is not None,
+    }
 
 
 @app.post("/api/unlock")
@@ -99,7 +104,21 @@ async def unlock(body: dict, response: Response):
 
     initialized = crypto.is_initialized(VAULT_ROOT)
 
-    if initialized:
+    if PRESET_PASSWORD is not None:
+        # 预设密码模式：直接比对输入密码（常数时间比较，防时序攻击）
+        if not secrets.compare_digest(password.encode("utf-8"), PRESET_PASSWORD.encode("utf-8")):
+            raise HTTPException(status_code=401, detail="密码错误或索引损坏")
+        key = crypto.derive_master_key(password)
+        password = None
+        # 若已有索引，验证预设密码能解开（预设密码被改过则提前拒绝，统一提示）
+        for index_path in crypto.find_encrypted_roots(VAULT_ROOT):
+            try:
+                crypto.read_index(key, index_path)
+            except ValueError:
+                raise HTTPException(status_code=401, detail="密码错误或索引损坏")
+        # 预设密码 = 密码已确定，标记为已初始化语义，避免首次加密时被误判为「未初始化会话」而失效
+        initialized = True
+    elif initialized:
         # 已初始化：单密码，派生后验证所有索引，任一失败即拒（统一提示，不泄露细节）
         key = crypto.derive_master_key(password)
         password = None

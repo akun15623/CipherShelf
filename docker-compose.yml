@@ -9,6 +9,9 @@ services:
     environment:
       VAULT_ROOT: /data        # 加解密操作的根目录
       PORT: "8080"
+      # 可选：预设初始密码（访问时输入它即可进入）。不设则走首次「创建密码」流程。
+      # 密码会明文保存在此 compose 文件里，注意文件权限，勿提交进版本库。
+      VAULT_PASSWORD: "change-me-strong-password"
     ports:
       - "6070:8080"
     volumes:

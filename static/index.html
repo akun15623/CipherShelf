@@ -102,17 +102,17 @@ if (typeof Vue === 'undefined' || typeof ElementPlus === 'undefined') {
   throw new Error('frontend libs not loaded');
 }
 
-const { createApp, ref, onMounted } = Vue;
+const { createApp, ref, computed, onMounted } = Vue;
 const { ElMessage } = ElementPlus;
 
 const TEMPLATE = `
   <div v-if="!unlocked" class="lock-wrap">
     <div class="lock-card">
       <div class="lock-icon">🔐</div>
-      <div class="lock-title">{{ initialized === false ? '创建密码' : '文件夹加解密' }}</div>
-      <div class="lock-sub">{{ initialized === false ? '首次使用：设置一个密码作为加解密密钥' : '输入密码进入（密码即加解密密钥）' }}</div>
+      <div class="lock-title">{{ needCreate ? '创建密码' : '文件夹加解密' }}</div>
+      <div class="lock-sub">{{ needCreate ? '首次使用：设置一个密码作为加解密密钥' : '输入密码进入（密码即加解密密钥）' }}</div>
 
-      <template v-if="initialized === false">
+      <template v-if="needCreate">
         <el-input v-model="password" type="password" show-password size="large" class="lock-input"
                   placeholder="设置密码（至少 8 位）" @keyup.enter="doUnlock" />
         <el-input v-model="confirmPassword" type="password" show-password size="large" class="lock-input"
@@ -121,7 +121,7 @@ const TEMPLATE = `
                    :loading="busy" @click="doUnlock">创建并进入</el-button>
       </template>
 
-      <template v-else-if="initialized === true">
+      <template v-else-if="showSingleInput">
         <el-input v-model="password" type="password" show-password size="large" class="lock-input"
                   placeholder="密码" @keyup.enter="doUnlock" />
         <el-button type="primary" size="large" style="width:100%;margin-top:18px;height:48px;"
@@ -195,10 +195,14 @@ const app = createApp({
   setup() {
     const unlocked = ref(false);
     const initialized = ref(null);  // null=加载中, true=已初始化(输密码), false=首次(创建密码)
+    const preset = ref(false);      // 环境变量是否预设了密码（预设则直接单密码框）
     const password = ref('');
     const confirmPassword = ref('');
     const busy = ref(false);
     const err = ref('');
+    // 锁屏形态：needCreate=创建密码两步；showSingleInput=单密码框
+    const needCreate = computed(() => initialized.value === false && !preset.value);
+    const showSingleInput = computed(() => initialized.value === true || preset.value === true);
 
     const treeRef = ref(null);
     const treeData = ref([{ name: '根目录', path: '', type: 'dir', encrypted: false }]);
@@ -227,13 +231,13 @@ const app = createApp({
     async function doUnlock() {
       err.value = '';
       if (!password.value) { err.value = '请输入密码'; return; }
-      if (initialized.value === false) {
+      if (needCreate.value) {
         if (password.value.length < 8) { err.value = '密码至少 8 位'; return; }
         if (password.value !== confirmPassword.value) { err.value = '两次输入的密码不一致'; return; }
       }
       busy.value = true;
       try {
-        const body = initialized.value === false
+        const body = needCreate.value
           ? { password: password.value, password_confirmation: confirmPassword.value }
           : { password: password.value };
         await api('/api/unlock', { method: 'POST', body: JSON.stringify(body) });
@@ -264,7 +268,7 @@ const app = createApp({
     function refreshStatus() {
       initialized.value = null;
       fetch('/api/status').then(s => s.json())
-        .then(d => { initialized.value = !!d.initialized; })
+        .then(d => { initialized.value = !!d.initialized; preset.value = !!d.preset; })
         .catch(() => { initialized.value = true; });
     }
 
@@ -358,7 +362,7 @@ const app = createApp({
     });
 
     return {
-      unlocked, initialized, password, confirmPassword, busy, err,
+      unlocked, initialized, preset, needCreate, showSingleInput, password, confirmPassword, busy, err,
       treeRef, treeData, treeProps, treeEmpty,
       progress, encryptSel, decryptSel,
       doUnlock, doLock, loadNode, onCheck, doEncrypt, doDecrypt, fmtSize,
