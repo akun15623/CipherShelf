@@ -2,7 +2,6 @@
 """生成 ciphershelf 飞牛应用图标（锁形，蓝底）。
 
 用法：在仓库根目录执行
-    python3 fnos/gen_icons.py fnos/native/ciphershelf
     python3 fnos/gen_icons.py fnos/docker/ciphershelf
 （需要 Pillow）
 """

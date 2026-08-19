@@ -50,6 +50,8 @@ INDEX_HEADER_V1_SIZE = 4 + 1 + NONCE_SIZE
 MAX_INDEX_SIZE = 64 * 1024 * 1024
 MAX_INDEX_ENTRIES = 1_000_000
 MAX_XATTR_BYTES = 1024 * 1024
+# Legacy v2 cryptographic domain separator. Keep this byte string unchanged
+# after the project rename so existing encrypted files remain decryptable.
 VAULT_KEY_INFO = b"secure-vault/v2/vault-key"
 KDF_SALT_SIZE = 16
 

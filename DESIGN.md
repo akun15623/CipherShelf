@@ -12,7 +12,7 @@
 ## 1. 背景与目标
 
 ### 1.1 背景
-secure-vault 原为「自托管加密网盘」，具备多层级目录、文件上传下载、缩略图、视频流式预览、批量操作、分享等完整网盘能力。经评估，网盘形态超出实际需求，现改造为**单点工具**。
+CipherShelf 的前身为「自托管加密网盘」，具备多层级目录、文件上传下载、缩略图、视频流式预览、批量操作、分享等完整网盘能力。经评估，网盘形态超出实际需求，现改造为**单点工具**。
 
 ### 1.2 目标
 - 选一个文件夹 → **就地加密**（文件内容加密、目录名/文件名变密文、结构保留）
@@ -98,7 +98,7 @@ FORMAT_V1_ITERATIONS = 600_000
 跨语言实现必须通过以下公开测试向量（仅用于测试，不是用户密码）：
 
 ```text
-password (UTF-8): secure-vault-test-password
+password (UTF-8): secure-vault-test-password  # 历史冻结测试向量，项目改名后仍不得修改
 salt (ASCII):     SVLT-PBKDF2-v1!!
 iterations:       600000
 dkLen:            32
@@ -519,10 +519,10 @@ python3 decrypt.py /data/照片 -o /restore/照片
 ```yaml
 # docker-compose.yml（改造后）
 services:
-  secure-vault:
+  ciphershelf:
     build: .
-    image: secure-vault:latest
-    container_name: secure-vault
+    image: ciphershelf:latest
+    container_name: ciphershelf
     restart: unless-stopped
     environment:
       VAULT_ROOT: /data        # 加解密操作的根目录
@@ -530,7 +530,7 @@ services:
     ports:
       - "6070:8080"            # 沿用 6070（或另选）
     volumes:
-      - /vol1/1000/appData/agent-common/projects/secure-vault/vault-data:/data
+      - /vol1/1000/appData/agent-common/projects/ciphershelf/vault-data:/data
 ```
 
 - 容器只挂载 `VAULT_ROOT`，前端只能操作该目录树。

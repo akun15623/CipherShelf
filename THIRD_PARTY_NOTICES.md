@@ -8,4 +8,4 @@ CipherShelf redistributes or installs the following principal components:
 - Uvicorn — BSD-3-Clause License — https://github.com/encode/uvicorn
 - cryptography — Apache-2.0 OR BSD-3-Clause — https://github.com/pyca/cryptography
 
-The `fnos/native/wheels` directory contains complete upstream wheel archives. Their `.dist-info` metadata and bundled license files remain authoritative for exact versions and transitive dependencies. Distributors should regenerate an SBOM and verify notices whenever dependencies change.
+The fnOS Docker image installs Python dependencies from the project requirements. Distributors should regenerate an SBOM and verify exact transitive dependency notices whenever the image dependencies change.

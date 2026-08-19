@@ -1,8 +1,6 @@
 # 飞牛 fnOS Docker 应用
 
-本目录将仓库根目录的 ciphershelf 源码打包成飞牛 fnOS **Docker** 应用（`.fpk`）。数据文件夹在**安装向导里手填绝对路径**（不走授权目录点选）。
-
-> 想要「应用设置里点选目录」请用 [Native 形态](../native/)。
+本目录将仓库根目录的 ciphershelf 源码打包成飞牛 fnOS **Docker** 应用（`.fpk`）。数据文件夹在安装向导里填写 NAS 绝对路径。
 
 ## 目录结构
 

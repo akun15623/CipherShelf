@@ -82,6 +82,7 @@ class CryptoTests(unittest.TestCase):
         self.assertIsNone(crypto.password_strength_error("Abcdef123!@#"))
 
     def test_kdf_vector_and_parameters_are_frozen(self):
+        # Historical public test vector: keep unchanged across the project rename.
         key = crypto.derive_master_key("secure-vault-test-password")
         self.assertEqual(key.hex(), "737d703b7454ea13eb5f9de1972bf9e6d154001e0415c1a04526a8490adeab06")
         with self.assertRaises(ValueError):
