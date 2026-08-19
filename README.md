@@ -86,6 +86,15 @@ python -m unittest -v test_crypto test_app
 
 请先阅读 [SECURITY.md](SECURITY.md)，不要在公开 issue 中附带可直接利用的漏洞细节或真实用户数据。
 
+## 项目主页与镜像
+
+CipherShelf 的开发主要在 Gitee，GitHub 是只读镜像。两条远程会持续同步同一组提交，但只保证 Gitee 上的 issue / 合并请求被维护者看到，GitHub 侧用于发布产物、代码浏览和通过 GitHub private security advisory 接收漏洞报告。
+
+- 主仓库（Gitee）：https://gitee.com/akun15623/ciphershelf
+- 镜像（GitHub）：https://github.com/akun15623/CipherShelf
+
+fnOS 应用包 `manifest` 里写死的 `maintainer_url` 仍指向 Gitee，请勿改为 GitHub，否则 fnOS 应用中心无法识别。
+
 ## 许可证
 
 [MIT](LICENSE)。第三方组件说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
