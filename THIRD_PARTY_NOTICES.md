@@ -1,5 +1,14 @@
 # Third-party notices
 
+## Source code
+
+CipherShelf is maintained primarily on Gitee and mirrored to GitHub. Both remotes track the same commits.
+
+- Primary: https://gitee.com/akun15623/ciphershelf
+- Mirror: https://github.com/akun15623/CipherShelf
+
+## Principal components
+
 CipherShelf redistributes or installs the following principal components:
 
 - Vue 3.5.13 — MIT License — https://github.com/vuejs/core

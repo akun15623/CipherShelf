@@ -1,5 +1,14 @@
 # Security Policy
 
+## Official repository mirrors
+
+CipherShelf is maintained primarily on Gitee (the platform where the fnOS `manifest` resolves `maintainer_url`) and mirrored to GitHub. When filing a vulnerability report, prefer the host whose private security-advisory channel you have access to.
+
+- Primary: https://gitee.com/akun15623/ciphershelf
+- Mirror: https://github.com/akun15623/CipherShelf
+
+Both remotes track the same commits; issues and advisories are not guaranteed to be cross-posted. Use the GitHub mirror if you want GitHub's private advisory workflow.
+
 ## Supported versions
 
 Only the latest release receives security fixes. Index formats v1 and v2 are supported for decryption and migration only; new indexes are written as format v3. Encrypted files continue to use the authenticated v2 file format.
